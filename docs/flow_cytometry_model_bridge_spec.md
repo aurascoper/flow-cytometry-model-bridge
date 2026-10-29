@@ -128,3 +128,27 @@ The software contract (`StakeholderTrackContract`, `OpenFOAMTransportSnap`, `PHR
 - [x] Solver snapshots (`OpenFOAMTransportSnap`, `PHREEQCSpeciationSnap`) checked for exact vessel, time, and compartment alignment via `validate_solver_observation_alignment`.
 - [x] Unit test suite (`code/test_FlowCytometryObservationModel.jl`) executed locally in Julia 1.13.1 (`118/118` passing assertions) covering concentration-likelihood consistency, synthetic-data recovery, zero/low counts, uncertainty propagation, equifinality, and held-out posterior-predictive checks.
 - [x] All outputs explicitly tagged as `:observed`, `:calibrated`, `:assumed`, or `:predicted` via `EpistemicQuantity` and `ProductionAuditRecord`.
+
+## 10. Microfluidic Cell Classification Workbench and Shared 3D Visualization Engine
+
+`code/MicrofluidicClassificationEngine.jl` (`ENGINE_VERSION = "0.2.0"`) extends the standalone observation-model adapter into a complete Julia-first microfluidic single-cell classification engine and interactive browser workbench (`workbench/microfluidic_cytometry_workbench.html`), verified with `606/606` passing Julia unit assertions (`julia --startup-file=no code/test_MicrofluidicClassificationEngine.jl`) and cross-language numerical verification against an independent Python reference implementation (`code/verify_against_python_reference.py`).
+
+### 10.1 Modular Julia architecture
+
+| Submodule | Responsibility | Key types and functions |
+|---|---|---|
+| `FCSIO` | Standards-compliant ISAC FCS 3.1 binary file reading/writing, channel metadata (`$PnN`, `$PnS`, `$PnR`), SHA-256 provenance, and microfluidic sensor/trajectory CSV ingestion | `FCSChannelMetadata`, `FCSFileProvenance`, `FCSDataset`, `SensorTrajectoryRow`, `read_fcs_file`, `write_fcs_file`, `load_microfluidic_sensor_csv`, `generate_synthetic_nanobio_fcs_dataset` |
+| `CytometryAnalysis` | Transformations (`linear`, `log10`, `arcsinh`, biexponential `logicle`), spectral spillover unmixing ($E_{\text{comp}} = E_{\text{raw}} S^{-1}$), quality control, hierarchical gates, and GatingML/JSON serialization | `LinearTransform`, `Log10Transform`, `ArcsinhTransform`, `BiexponentialLogicleTransform`, `SpilloverMatrix`, `apply_compensation`, `run_quality_control`, `RectangleGate`, `PolygonGate`, `EllipseGate`, `RangeGate`, `QuadGate`, `GatingHierarchy`, `evaluate_hierarchy` |
+| `CellClassifier` | Single-cell feature extraction, calibrated supervised classification across the 4 Nano-Bio Lab target tasks, confidence abstention (`:defer_for_review`), and strict group-aware splitting (`:chip_id`, `:run_id`, `:sample_id`, `:biological_replicate`) | `MicrofluidicCellClassifier`, `SingleCellPrediction`, `ClassifierValidationReport`, `train_cell_classifier`, `predict_cells`, `group_aware_split`, `verify_no_group_leakage`, `group_cross_validate` |
+| `MicrofluidicBridge` | Joins cytometry events, hierarchical gates, classifier predictions, and micropore transit trajectories ($\Delta t_{\text{transit}}$, blockage ratio $\Delta I / I_0$, deformability index) to `FlowCytometryObservationModel` | `MicrofluidicAssayCondition`, `MicroporeTransitEvent`, `JoinedMicrofluidicCellRecord`, `MicrofluidicBridgeReport`, `join_cytometry_and_microfluidics`, `summarize_to_fcm_sample`, `bridge_to_observation_model`, `export_reproducible_analysis_bundle` |
+| `SharedVisualizationPhysics` | Domain-separated 3D wireframe-over-core computational physics for Track 1 (Dr. Santaneel Ghosh) and Track 3 (Iain Jack) | `CoreMultishellSpec`, `solve_core_multishell_rd`, `EmulsionDropletSpec`, `solve_emulsion_interfacial_droplet` |
+
+### 10.2 Domain-separated 3D visualization physics
+
+1. **Track 1 (Dr. Santaneel Ghosh - Core-Multishell Reaction-Diffusion and Microfluidic Single-Cell Classification):**
+   - `solve_core_multishell_rd` solves the conservative multi-stratum radial spherical reaction-diffusion equation across concentric strata $\Omega_1 \dots \Omega_L$ ($0 < R_0 < R_1 < R_2 \dots < R_L$) with an octant cutaway and surrounding wireframe isosurface, coupling released payload $F_{\text{rel}}(t)$ and microfluidic channel exposure $C_{\text{exp}}(t)$ to single-cell classification fractions.
+   - **Epistemic boundary:** `CoreMultishellSpec` enforces `track == :track1_nanobio` and `epistemic_status == :predicted`, labeling the shells as simulated concentration fields rather than observed physical layers unless independently verified by imaging.
+2. **Track 3 (Iain Jack - Interface-Resolved Emulsion Dynamics: From Constitutive Rheology to Multiphase Flow):**
+   - `solve_emulsion_interfacial_droplet` models bitumen/double-emulsion droplet deformation $D = (L - B)/(L + B)$ under shear rate $\dot{\gamma}$, capillary number $\text{Ca} = \mu_c \dot{\gamma} a_0 / \sigma(T)$, Boussinesq-Scriven temperature-dependent interfacial shear/dilatational viscosity $\mu_s(T), \kappa_s(T)$, internal twin-vortex circulation, and hydrodynamic pressure field $P/\text{Pa}$ across dimensionless times $t/\tau_\eta \in [1.0, 15.0]$.
+   - **Boundary:** `EmulsionDropletSpec` enforces `track == :track3_bitumen_rheology` and `has_biological_release_shells == false`, reusing 3D wireframe/isosurface rendering infrastructure without importing biological release shell assumptions.
+

@@ -1,98 +1,532 @@
-from pptx import Presentation
-from pptx.util import Inches, Pt
-from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR
-from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
-from pptx.oxml.xmlchemy import OxmlElement
+#!/usr/bin/env python3
+"""
+Build script for:
+1. Ghosh Exploratory Deck (5 slides):
+   - presentations/Single_Cell_Flow_Cytometry_Model_Bridge_Exploratory.pptx
+   - presentations/Single_Cell_Flow_Cytometry_Model_Bridge_Exploratory.pdf
+   - previews/Ghosh_Bridge_Slide_5.png (1920x1080)
+   Slide 5 title: "Core-Multishell Reaction-Diffusion and Microfluidic Single-Cell Classification"
+   Includes 3D octant-cutaway core-multishell (R0, R1, R2) + wireframe isosurface
+   paired with microfluidic channel single-cell trajectory coupling.
+
+2. Jack Exploratory Adaptation Deck (1 slide):
+   - presentations/Interface_Resolved_Emulsion_Dynamics_Exploratory.pptx
+   - presentations/Interface_Resolved_Emulsion_Dynamics_Exploratory.pdf
+   - previews/Jack_Emulsion_Interface_Slide_1.png (1920x1080)
+   Slide 1 title: "Interface-Resolved Emulsion Dynamics: From Constitutive Rheology to Multiphase Flow"
+   Includes deformed bitumen double-emulsion droplet + wireframe interface mesh under shear
+   (t/tau_eta = 1..15) paired with internal twin-vortex velocity and pressure field P/Pa.
+"""
+
+import io
+import math
+import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 
-out=Path('/mnt/data/Single_Cell_Flow_Cytometry_Model_Bridge_Exploratory.pptx')
-prs=Presentation()
-prs.slide_width= Inches(13.333333)
-prs.slide_height= Inches(7.5)
-BG='F6F5F0'; INK='273238'; MUTED='536168'; OCHRE='A86418'; TEAL='3C6D65'; BLUE='4A779D'; RED='A34C43'; BORDER='D4D2CB'; WHITE='FFFFFF'; PALE_TEAL='E1EBE6'; PALE_BLUE='E4EDF4'; PALE_GOLD='F5E5C5'; PALE_GRAY='E5E4DF'; PALE_RED='F3E2DE'
-def rgb(h): return RGBColor(int(h[0:2],16),int(h[2:4],16),int(h[4:6],16))
-def bg(sl):
-    sl.background.fill.solid(); sl.background.fill.fore_color.rgb=rgb(BG)
-def text(sl,t,x,y,w,h,size=14,color=INK,font='Arial',bold=False,align=PP_ALIGN.LEFT,valign=MSO_ANCHOR.TOP,margin=.02):
-    sh=sl.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h)); tf=sh.text_frame; tf.clear(); tf.word_wrap=True
-    tf.margin_left=Inches(margin); tf.margin_right=Inches(margin); tf.margin_top=Inches(margin); tf.margin_bottom=Inches(margin); tf.vertical_anchor=valign
-    for i,line in enumerate(t.split('\n')):
-        p=tf.paragraphs[0] if i==0 else tf.add_paragraph(); p.text=line; p.alignment=align
-        p.space_after=Pt(4)
-        for r in p.runs: r.font.name=font; r.font.size=Pt(size); r.font.bold=bold; r.font.color.rgb=rgb(color)
-    return sh
-def card(sl,x,y,w,h,fill,title,body,accent=INK,body_size=12.5,title_size=15):
-    sh=sl.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h))
-    sh.fill.solid(); sh.fill.fore_color.rgb=rgb(fill); sh.line.color.rgb=rgb(BORDER); sh.line.width=Pt(.8)
-    text(sl,title,x+.16,y+.13,w-.32,.34,size=title_size,color=accent,bold=True)
-    text(sl,body,x+.16,y+.54,w-.32,h-.65,size=body_size,color=INK)
-    return sh
-def arrow(sl,x1,y1,x2,y2,color=TEAL):
-    sh=sl.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, Inches(x1), Inches(y1), Inches(x2), Inches(y2)); sh.line.color.rgb=rgb(color); sh.line.width=Pt(2)
-    tri=sl.shapes.add_shape(MSO_SHAPE.ISOSCELES_TRIANGLE, Inches(x2-.08), Inches(y2-.08), Inches(.16), Inches(.16)); tri.fill.solid(); tri.fill.fore_color.rgb=rgb(color); tri.line.fill.background(); tri.rotation=90
-    return sh
-def header(sl,eyebrow,title,subtitle=None):
-    text(sl,eyebrow.upper(),.88,.78,11.8,.28,size=11.5,color=OCHRE)
-    text(sl,title,.88,1.22,11.9,.75,size=25,color=INK,font='Georgia',bold=True)
-    if subtitle: text(sl,subtitle,.9,1.98,11.8,.42,size=13.2,color=MUTED)
-def footer(sl,s): text(sl,s,.88,6.86,11.9,.24,size=9.2,color=MUTED)
-def notes(sl,s):
-    try: sl.notes_slide.notes_text_frame.text=s
-    except Exception: pass
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle, Ellipse, FancyBboxPatch, Polygon, Wedge
+import numpy as np
+from PIL import Image
+from pypdf import PdfReader, PdfWriter
 
-# Slide 1
-sl=prs.slides.add_slide(prs.slide_layouts[0]); bg(sl)
-header(sl,'Exploratory methods bridge · not a validated model','The missing bridge is an observation model','A simulation predicts hidden states; flow cytometry measures a gated sample of cell-level outcomes.')
-card(sl,.88,2.72,3.75,2.58,PALE_GRAY,'1 · FORWARD MODEL','OpenFOAM: flow, shear and residence time\nPHREEQC: aqueous speciation and mineral equilibria\nJulia: cell-state, reaction and transport dynamics',accent=MUTED,body_size=12.1,title_size=15)
-card(sl,4.82,2.72,3.75,2.58,PALE_BLUE,'2 · OBSERVATION OPERATOR','Project latent state to sample-specific outputs:\n• absolute gated-cell concentration\n• membrane-integrity gate fractions\n• fluorescence / scatter distributions\nInclude calibration, sampling and recovery.',accent=BLUE,body_size=12.1,title_size=15)
-card(sl,8.77,2.72,3.75,2.58,PALE_TEAL,'3 · INFERENCE & FALSIFICATION','Compare predicted and measured summaries.\nEstimate uncertainty in rates.\nTest rival mechanisms and held-out time points.\nDo not treat one good fit as unique causality.',accent=TEAL,body_size=12.1,title_size=15)
-arrow(sl,4.65,4.0,4.78,4.0,TEAL); arrow(sl,8.60,4.0,8.72,4.0,TEAL)
-ban=sl.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(.88), Inches(5.62), Inches(11.94), Inches(.68)); ban.fill.solid(); ban.fill.fore_color.rgb=rgb(PALE_GOLD); ban.line.fill.background()
-text(sl,'Flow cytometry belongs in the measurement / likelihood layer, not inside the CFD or geochemical solver.',1.1,5.77,11.5,.38,size=13.1,bold=True,valign=MSO_ANCHOR.MIDDLE)
-footer(sl,'Calibration precedent: Yip et al. (2022), PLOS Comput Biol 18(10):e1010533, https://doi.org/10.1371/journal.pcbi.1010533')
-notes(sl,'This slide is an architecture proposal. The Nano-Bio Lab public research page emphasizes single-cell analysis, computational cell classification and signal processing; the user indicates flow cytometry is also part of Dr. Ghosh’s work. Flow cytometry observes sampled cell populations, not the full spatial field. Yip et al. review calibration against microscopy and flow cytometry and note that rigorous validation remains challenging.')
 
-# Slide 2
-sl=prs.slides.add_slide(prs.slide_layouts[0]); bg(sl)
-header(sl,'Architecture · keep the solvers in their lanes','One modular stack, two independent kinds of inputs','Only couple a solver if its fields represent a real part of the target experiment.')
-card(sl,.88,2.55,2.55,1.45,PALE_GRAY,'OPENFOAM','Velocity u(x,t), pressure, shear, residence time and transport.',accent=MUTED,body_size=11.4,title_size=14)
-card(sl,.88,4.28,2.55,1.45,PALE_GOLD,'PHREEQC','pH / pe, ionic strength, aqueous species, Fe/S chemistry and mineral saturation.',accent=OCHRE,body_size=11.2,title_size=14)
-card(sl,4.05,3.31,2.65,1.70,PALE_TEAL,'JULIA STATE MODEL','Attached / suspended cells; state fractions; growth, death, attachment, detachment and EPS proxy.',accent=TEAL,body_size=11.5,title_size=14)
-card(sl,7.40,3.31,2.45,1.70,PALE_BLUE,'FCM PREDICTION','Predict the exact quantities the gates report, including calibration and sample-origin effects.',accent=BLUE,body_size=11.4,title_size=13.2)
-card(sl,10.53,2.55,2.29,1.45,WHITE,'MEASURED FCM','Raw events, saved gates, counting beads, dilution and recovery.',accent=BLUE,body_size=10.8,title_size=13)
-card(sl,10.53,4.28,2.29,1.45,PALE_RED,'MODEL CHECK','Compare distributions; quantify uncertainty and check rival models.',accent=RED,body_size=10.8,title_size=13)
-arrow(sl,3.43,3.25,4.01,3.79,MUTED); arrow(sl,3.43,4.94,4.01,4.42,OCHRE); arrow(sl,6.70,4.16,7.35,4.16,TEAL); arrow(sl,9.85,4.60,10.48,4.94,BLUE); arrow(sl,11.66,4.02,11.66,4.25,OCHRE)
-ban=sl.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(.88), Inches(5.93), Inches(11.94), Inches(.51)); ban.fill.solid(); ban.fill.fore_color.rgb=rgb(PALE_GOLD); ban.line.fill.background()
-text(sl,'FCM loses spatial position: pair cell-state distributions with microscopy and endpoint surface / mineral analysis.',1.06,6.01,11.55,.34,size=12.5,bold=True,valign=MSO_ANCHOR.MIDDLE)
-footer(sl,'Nano-Bio Lab research overview: https://www.nanobiolab.org/research · Model-calibration review: https://doi.org/10.1371/journal.pcbi.1010533')
-notes(sl,'OpenFOAM and PHREEQC are conditional, not mandatory. They fit only if a study has fluid-mechanical and aqueous-speciation questions. A nanocarrier/cell experiment may need neither solver, while the clay/corrosion model may need both. Do not transplant the parameters between the two application branches.')
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PRES_DIR = REPO_ROOT / "presentations"
+PREV_DIR = REPO_ROOT / "previews"
 
-# Slide 3
-sl=prs.slides.add_slide(prs.slide_layouts[0]); bg(sl)
-header(sl,'Separate applications · share the software pattern, not the parameters','Two possible flow-cytometry branches should stay separate','The same observation-model idea can serve different biology, but the targets and calibration differ.')
-card(sl,.88,2.60,5.75,2.77,PALE_BLUE,'A · NANO-BIO / CELL-ASSOCIATION ASSAY','Possible observables:\n• percent fluorescent-positive cells\n• per-cell fluorescence distribution\n• validated cell-state / membrane-integrity markers\n• scatter / morphology proxies\n\nKey control: distinguish surface association from internalization; cytometry alone may not localize the signal.',accent=BLUE,body_size=12.1,title_size=15)
-card(sl,6.87,2.60,5.95,2.77,PALE_TEAL,'B · MICROBIAL / CLAY-BIOFILM ASSAY','Possible observables:\n• absolute gated-cell concentration\n• membrane-integrity state fractions\n• detached vs planktonic sample differences\n• optional validated metabolic panel\n\nKey control: clay-only blanks, disaggregation recovery, staining controls and oxygen-safe sampling.',accent=TEAL,body_size=12.1,title_size=15)
-ban=sl.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(.88), Inches(5.67), Inches(11.94), Inches(.69)); ban.fill.solid(); ban.fill.fore_color.rgb=rgb(PALE_GOLD); ban.line.fill.background()
-text(sl,'Do not merge the hypotheses: a nanocarrier uptake model is not the clay–corrosion model. Re-estimate chemistry, kinetics, gates and parameters for each system.',1.07,5.80,11.55,.46,size=12.5,bold=True,valign=MSO_ANCHOR.MIDDLE)
-footer(sl,'Flow-cytometric biofilm methods: Kerstens et al. (2015), https://doi.org/10.1007/s12223-015-0400-4; Grainha et al. (2020), https://doi.org/10.3390/antibiotics9110741')
-notes(sl,'For a Ghosh-facing conversation, lead with the single-cell/nanobio branch only if it matches the actual assay he runs. For Ellen Wan and Andrew Hoffman, the microbial/clay branch is relevant. The Nano-Bio Lab public page describes single-cell analysis and computational analysis of cell morphology; do not state that the current project uses a particular cytometer protocol unless confirmed.')
 
-# Slide 4
-sl=prs.slides.add_slide(prs.slide_layouts[0]); bg(sl)
-header(sl,'Smallest falsifiable workflow · discussion draft','Make the cytometry link testable before fitting the model','The goal is to distinguish mechanisms, not to make a visual match look like a validated prediction.')
-steps=[
-('1 · PREDECLARE','Sample origin, time points, stains, gates, instrument settings, primary summaries and exclusion rules.'),
-('2 · CALIBRATE','Unstained / stain-only, single-stain or compensation controls, live-like / dead-like controls, blank matrix and counting beads.'),
-('3 · MATCH THE STATE','Map each sample to effluent, planktonic or detached-biofilm model state. Record extraction recovery and dilution.'),
-('4 · TEST PREDICTION','Fit on designated observations; check posterior predictive distributions or held-out time points. Report non-identifiable alternatives.')]
-for i,(title,body) in enumerate(steps):
-    x=.88+(i%2)*6.0; y=2.55+(i//2)*1.52
-    card(sl,x,y,5.65,1.26,[PALE_GRAY,PALE_BLUE,PALE_TEAL,PALE_GOLD][i],title,body,accent=[MUTED,BLUE,TEAL,OCHRE][i],body_size=11.5,title_size=14)
-ban=sl.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(.88), Inches(5.80), Inches(11.94), Inches(.56)); ban.fill.solid(); ban.fill.fore_color.rgb=rgb(PALE_RED); ban.line.fill.background()
-text(sl,'Falsifier: if predicted cell-state distributions do not track the measurements under the predeclared calibration, revise or reject the state model; do not tune gates after seeing the desired result.',1.07,5.90,11.55,.38,size=11.9,bold=True,valign=MSO_ANCHOR.MIDDLE)
-footer(sl,'Assay cautions: Kerstens et al. (2015); Grainha et al. (2020). Calibration concepts: Yip et al. (2022).')
-notes(sl,'This is a discussion plan, not a validated protocol. In the current clay coupon pilot, cytometry would be an exploratory secondary readout and must not displace the preselected maximum-pit-depth endpoint. Repeated sampling can change volume, headspace, redox and biomass; consider sacrificial or companion vessels if sampling disturbs the system.')
+def render_ghosh_slide_5_png(out_path: Path):
+    """Render 1920x1080 Slide 5 for Dr. Santaneel Ghosh."""
+    fig = plt.figure(figsize=(19.2, 10.8), dpi=100, facecolor="#F6F5F0")
+    ax = fig.add_axes([0, 0, 1, 1], facecolor="#F6F5F0")
+    ax.set_xlim(0, 13.333)
+    ax.set_ylim(0, 7.5)
+    ax.invert_yaxis()
+    ax.axis("off")
 
-prs.save(out)
-print(out, len(prs.slides))
+    # Header
+    ax.text(
+        0.88, 0.92,
+        "SHARED 3D VISUALIZATION ENGINE . TRACK 1 NANO-BIO CENTERPIECE",
+        fontsize=13, fontweight="bold", color="#A86418", family="sans-serif"
+    )
+    ax.text(
+        0.88, 1.48,
+        "Core-Multishell Reaction-Diffusion and Microfluidic Single-Cell Classification",
+        fontsize=25, fontweight="bold", color="#273238", family="serif"
+    )
+    ax.text(
+        0.88, 1.98,
+        "Concentric spherical release shells (R0, R1, R2) + surrounding wireframe isosurface coupled to microfluidic cell classification.",
+        fontsize=14, color="#536168", family="sans-serif"
+    )
+
+    # Left Card: Core-Multishell Octant-Cutaway View
+    left_card = FancyBboxPatch(
+        (0.88, 2.35), 5.65, 3.20,
+        boxstyle="round,pad=0.04,rounding_size=0.18",
+        facecolor="#E4EDF4", edgecolor="#D4D2CB", linewidth=1.5
+    )
+    ax.add_patch(left_card)
+    ax.text(
+        1.10, 2.68,
+        "1 . CORE-MULTISHELL OCTANT-CUTAWAY VIEW (R0, R1, R2)",
+        fontsize=13.5, fontweight="bold", color="#4A779D"
+    )
+    ax.text(
+        1.10, 3.12,
+        "* Inner core R0 (Omega_1), mid shell R1 (Omega_2),\n"
+        "  outer shell R2 (Omega_3) + wireframe front\n"
+        "* Solves radial reaction-diffusion:\n"
+        "  du/dt = (1/r^2) d/dr(D_l r^2 du/dr) - k_l u\n"
+        "* Animated concentration field u(x,y,z,t) in [0, 0.03]\n"
+        "* Epistemic tag: :predicted simulated concentration\n"
+        "  shells, not assumed physical layers",
+        fontsize=11.5, color="#273238", va="top", linespacing=1.38
+    )
+
+    # Embedded 3D Octant-Cutaway Sphere Diagram inside Left Card (right half)
+    cx, cy = 5.20, 4.10
+    # Wireframe outer isosurface rings
+    for ang in (-55, -25, 0, 25, 55):
+        ell = Ellipse(
+            (cx, cy), width=2.15, height=2.15 * math.cos(math.radians(ang)),
+            angle=22, fill=False, edgecolor="#38bdf8", linestyle="--", linewidth=0.9, alpha=0.75
+        )
+        ax.add_patch(ell)
+    # Outer shell R2 (red/rose)
+    w_r2 = Wedge((cx, cy), 0.98, 0, 270, facecolor="#e11d48", alpha=0.42, edgecolor="#be123c", lw=1.6)
+    # Mid shell R1 (indigo/violet)
+    w_r1 = Wedge((cx, cy), 0.70, 0, 270, facecolor="#6366f1", alpha=0.65, edgecolor="#4338ca", lw=1.6)
+    # Inner core R0 (gold/yellow)
+    w_r0 = Wedge((cx, cy), 0.38, 0, 270, facecolor="#facc15", alpha=0.95, edgecolor="#ca8a04", lw=1.6)
+    ax.add_patch(w_r2)
+    ax.add_patch(w_r1)
+    ax.add_patch(w_r0)
+    ax.text(cx - 0.14, cy - 0.10, "R0", fontsize=10.5, fontweight="bold", color="#273238")
+    ax.text(cx + 0.36, cy - 0.12, "R1", fontsize=10.5, fontweight="bold", color="#1e1b4b")
+    ax.text(cx + 0.70, cy - 0.12, "R2", fontsize=10.5, fontweight="bold", color="#881337")
+
+    # Right Card: Microfluidic Coupling & Single-Cell Classification View
+    right_card = FancyBboxPatch(
+        (6.85, 2.35), 5.60, 3.20,
+        boxstyle="round,pad=0.04,rounding_size=0.18",
+        facecolor="#E1EBE6", edgecolor="#D4D2CB", linewidth=1.5
+    )
+    ax.add_patch(right_card)
+    ax.text(
+        7.07, 2.68,
+        "2 . MICROFLUIDIC COUPLING & SINGLE-CELL CLASSIFICATION",
+        fontsize=13.5, fontweight="bold", color="#3C6D65"
+    )
+    ax.text(
+        7.05, 3.10,
+        "* Constriction (25 -> 7.5 um) couples\n"
+        "  local release C_exp(t) to cell transit\n"
+        "* Measures dt_transit, impedance pulse\n"
+        "  dI/I0, deformability, Cy5/SYBR/PI\n"
+        "* Calibrated classifier + :defer_for_review\n"
+        "  and strict chip_id group-aware splits\n"
+        "* Bridges to ObservationModel.jl MLE",
+        fontsize=11.0, color="#273238", va="top", linespacing=1.36
+    )
+
+    # Embedded Microfluidic Constriction Diagram inside Right Card
+    ch_box = FancyBboxPatch(
+        (10.22, 3.30), 2.08, 1.65,
+        boxstyle="round,pad=0.02,rounding_size=0.08",
+        facecolor="#ffffff", edgecolor="#3C6D65", linewidth=1.2
+    )
+    ax.add_patch(ch_box)
+    # Constriction walls
+    top_wall = Polygon([[10.28, 3.42], [10.88, 3.42], [11.06, 3.84], [11.46, 3.84], [11.64, 3.42], [12.24, 3.42]],
+                       closed=False, fill=False, edgecolor="#273238", lw=1.8)
+    bot_wall = Polygon([[10.28, 4.80], [10.88, 4.80], [11.06, 4.38], [11.46, 4.38], [11.64, 4.80], [12.24, 4.80]],
+                       closed=False, fill=False, edgecolor="#273238", lw=1.8)
+    ax.add_patch(top_wall)
+    ax.add_patch(bot_wall)
+    # Cells in channel
+    ax.add_patch(Ellipse((10.58, 4.06), 0.22, 0.20, facecolor="#16a34a", edgecolor="#ffffff", lw=1))
+    ax.add_patch(Ellipse((11.26, 4.11), 0.32, 0.13, facecolor="#16a34a", edgecolor="#ffffff", lw=1))
+    ax.add_patch(Ellipse((11.95, 4.22), 0.22, 0.20, facecolor="#2563eb", edgecolor="#ffffff", lw=1))
+    ax.text(11.26, 4.68, "dt_transit & Gate MLE", fontsize=9.2, ha="center", color="#3C6D65", fontweight="bold")
+
+    # Bottom Epistemic Boundary Banner
+    banner = FancyBboxPatch(
+        (0.88, 5.76), 11.57, 0.68,
+        boxstyle="round,pad=0.02,rounding_size=0.12",
+        facecolor="#F5E5C5", edgecolor="none"
+    )
+    ax.add_patch(banner)
+    ax.text(
+        1.10, 6.10,
+        "Epistemic boundary: label shells as simulated concentration fields (:predicted), not observed physical layers, unless independent imaging confirms morphology.",
+        fontsize=12.2, fontweight="bold", color="#273238", va="center"
+    )
+
+    # Footer
+    ax.text(
+        0.88, 6.92,
+        "Nano-Bio Lab fit: sustained release from core-multishell nanocarriers, micropore cell discrimination, and group-aware single-cell classification.",
+        fontsize=10.0, color="#536168"
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(out_path), dpi=100)
+    plt.close(fig)
+
+
+def render_jack_slide_1_png(out_path: Path):
+    """Render 1920x1080 Slide 1 for Iain Jack."""
+    fig = plt.figure(figsize=(19.2, 10.8), dpi=100, facecolor="#F6F5F0")
+    ax = fig.add_axes([0, 0, 1, 1], facecolor="#F6F5F0")
+    ax.set_xlim(0, 13.333)
+    ax.set_ylim(0, 7.5)
+    ax.invert_yaxis()
+    ax.axis("off")
+
+    # Header
+    ax.text(
+        0.88, 0.92,
+        "SHARED 3D VISUALIZATION ENGINE . TRACK 3 INTERFACIAL RHEOLOGY ADAPTATION",
+        fontsize=13, fontweight="bold", color="#A86418", family="sans-serif"
+    )
+    ax.text(
+        0.88, 1.48,
+        "Interface-Resolved Emulsion Dynamics: From Constitutive Rheology to Multiphase Flow",
+        fontsize=24, fontweight="bold", color="#273238", family="serif"
+    )
+    ax.text(
+        0.88, 1.98,
+        "Translate the wireframe-over-core motif to bitumen emulsion droplets under shear, temperature, and emulsifier kinetics.",
+        fontsize=14, color="#536168", family="sans-serif"
+    )
+
+    # Left Card: Droplet Deformation & Wireframe Interface Mesh
+    left_card = FancyBboxPatch(
+        (0.88, 2.35), 5.65, 3.20,
+        boxstyle="round,pad=0.04,rounding_size=0.18",
+        facecolor="#E5E4DF", edgecolor="#D4D2CB", linewidth=1.5
+    )
+    ax.add_patch(left_card)
+    ax.text(
+        1.10, 2.68,
+        "1 . DROPLET INTERFACE & DEFORMATION (t / tau_eta = 1..15)",
+        fontsize=13.5, fontweight="bold", color="#536168"
+    )
+    ax.text(
+        1.10, 3.10,
+        "* Bitumen droplet core + interface mesh\n"
+        "* Taylor deformation D = (L - B)/(L + B)\n"
+        "  under Ca = mu_c * gamma_dot * a0 / sigma\n"
+        "* Boussinesq-Scriven temperature-\n"
+        "  dependent interfacial viscosity\n"
+        "* Captures elongation & necking without\n"
+        "  biological release shell assumptions",
+        fontsize=11.0, color="#273238", va="top", linespacing=1.36
+    )
+
+    # Deformed Droplet Sequence Diagram inside Left Card
+    for idx, (tx, t_lbl, b_scale) in enumerate([(4.65, "t/tau=2", 0.55), (5.35, "t/tau=8", 0.34), (6.05, "t/tau=15", 0.18)]):
+        ell_outer = Ellipse(
+            (tx, 4.15), width=b_scale, height=1.35, angle=14 * (idx + 1),
+            facecolor="#7f1d1d", alpha=0.82, edgecolor="#f87171", lw=1.4
+        )
+        ax.add_patch(ell_outer)
+        ax.text(tx, 5.05, t_lbl, fontsize=9.0, ha="center", color="#273238", fontweight="bold")
+
+    # Right Card: Twin-Vortex Velocity & Pressure Field P/Pa
+    right_card = FancyBboxPatch(
+        (6.85, 2.35), 5.60, 3.20,
+        boxstyle="round,pad=0.04,rounding_size=0.18",
+        facecolor="#E4EDF4", edgecolor="#D4D2CB", linewidth=1.5
+    )
+    ax.add_patch(right_card)
+    ax.text(
+        7.07, 2.68,
+        "2 . MULTIPHASE VORTEX FLOW & PRESSURE FIELD (P / Pa)",
+        fontsize=13.5, fontweight="bold", color="#4A779D"
+    )
+    ax.text(
+        7.05, 3.10,
+        "* Internal twin-vortex circulation and\n"
+        "  external shear streamlines (a, b, c)\n"
+        "* Hydrodynamic pressure P/Pa in\n"
+        "  [-0.30, 1.40] & emulsifier Gamma\n"
+        "* Validated against DSR & moisture-\n"
+        "  susceptibility measurements\n"
+        "* Track 3 rejects cytometry coupling",
+        fontsize=11.0, color="#273238", va="top", linespacing=1.36
+    )
+
+    # Embedded Double-Emulsion Vortex/Pressure Schematic inside Right Card
+    p_box = FancyBboxPatch(
+        (10.22, 3.30), 2.08, 1.65,
+        boxstyle="round,pad=0.02,rounding_size=0.08",
+        facecolor="#22c55e", alpha=0.28, edgecolor="#4A779D", linewidth=1.2
+    )
+    ax.add_patch(p_box)
+    ax.add_patch(Ellipse((11.26, 4.10), 1.55, 0.78, angle=-18, facecolor="#4ade80", alpha=0.45, edgecolor="#dc2626", lw=2.0))
+    ax.add_patch(Ellipse((11.26, 4.10), 0.68, 0.58, angle=-10, facecolor="#ef4444", alpha=0.85, edgecolor="#1d4ed8", lw=1.8))
+    ax.text(11.26, 4.10, "P/Pa", fontsize=9.5, ha="center", va="center", color="#ffffff", fontweight="bold")
+    ax.text(11.26, 4.74, "Twin Vortex + Core Pressure", fontsize=8.8, ha="center", color="#273238", fontweight="bold")
+
+    # Bottom Boundary Banner
+    banner = FancyBboxPatch(
+        (0.88, 5.76), 11.57, 0.68,
+        boxstyle="round,pad=0.02,rounding_size=0.12",
+        facecolor="#F5E5C5", edgecolor="none"
+    )
+    ax.add_patch(banner)
+    ax.text(
+        1.10, 6.10,
+        "Architecture rule: reuse 3D wireframe/isosurface rendering and data infrastructure, not unvalidated physical parameters across tracks.",
+        fontsize=12.2, fontweight="bold", color="#273238", va="center"
+    )
+
+    # Footer
+    ax.text(
+        0.88, 6.92,
+        "Track 3 Bitumen Emulsion & Interfacial Rheology: coupled constitutive rheology (Julia) + multiphase flow (OpenFOAM), separate from Track 1/Track 2.",
+        fontsize=10.0, color="#536168"
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(out_path), dpi=100)
+    plt.close(fig)
+
+
+def _make_full_bleed_slide_xml(r_id_img: str) -> bytes:
+    """Create an OpenXML slide that displays a high-resolution full-slide figure cleanly."""
+    xml = f"""<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <p:cSld>
+    <p:bg>
+      <p:bgPr>
+        <a:solidFill><a:srgbClr val="F6F5F0"/></a:solidFill>
+        <a:effectLst/>
+      </p:bgPr>
+    </p:bg>
+    <p:spTree>
+      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+      <p:grpSpPr/>
+      <p:pic>
+        <p:nvPicPr>
+          <p:cNvPr id="2" name="SlideRender" descr="High-resolution domain visualization slide"/>
+          <p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr>
+          <p:nvPr/>
+        </p:nvPicPr>
+        <p:blipFill>
+          <a:blip r:embed="{r_id_img}"/>
+          <a:stretch><a:fillRect/></a:stretch>
+        </p:blipFill>
+        <p:spPr>
+          <a:xfrm>
+            <a:off x="0" y="0"/>
+            <a:ext cx="12191999" cy="6858000"/>
+          </a:xfrm>
+          <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+        </p:spPr>
+      </p:pic>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:sld>"""
+    return xml.encode("utf-8")
+
+
+def _make_notes_xml(note_text: str) -> bytes:
+    xml = f"""<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+      <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="3" name="Notes Placeholder 2"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="3" sz="quarter"/></p:nvPr></p:nvSpPr>
+        <p:spPr/>
+        <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{note_text}</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:notes>"""
+    return xml.encode("utf-8")
+
+
+def update_ghosh_pptx_and_pdf(slide5_png: Path, pptx_path: Path, pdf_path: Path):
+    """Ensure Ghosh exploratory deck has 5 slides (Slides 1-4 preserved + Slide 5 added)."""
+    with tempfile.TemporaryDirectory() as tmpd:
+        tmp_zip = Path(tmpd) / "ghosh.pptx"
+        with zipfile.ZipFile(pptx_path, "r") as zin:
+            names = zin.namelist()
+            items = {n: zin.read(n) for n in names}
+
+        # Add png Default to [Content_Types].xml if not present, plus slide5 & notesSlide5 Overrides
+        ct = items["[Content_Types].xml"].decode("utf-8")
+        if 'Extension="png"' not in ct:
+            ct = ct.replace(
+                '<Default Extension="jpeg" ContentType="image/jpeg"/>',
+                '<Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="png" ContentType="image/png"/>'
+            )
+        if "/ppt/slides/slide5.xml" not in ct:
+            ct = ct.replace(
+                "</Types>",
+                '<Override PartName="/ppt/slides/slide5.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
+                '<Override PartName="/ppt/notesSlides/notesSlide5.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/></Types>'
+            )
+        items["[Content_Types].xml"] = ct.encode("utf-8")
+
+        # Update ppt/presentation.xml
+        pres = items["ppt/presentation.xml"].decode("utf-8")
+        if 'r:id="rId12"' not in pres:
+            pres = pres.replace(
+                '<p:sldId id="259" r:id="rId11"/></p:sldIdLst>',
+                '<p:sldId id="259" r:id="rId11"/><p:sldId id="260" r:id="rId12"/></p:sldIdLst>'
+            )
+        items["ppt/presentation.xml"] = pres.encode("utf-8")
+
+        # Update ppt/_rels/presentation.xml.rels
+        prels = items["ppt/_rels/presentation.xml.rels"].decode("utf-8")
+        if 'Id="rId12"' not in prels:
+            prels = prels.replace(
+                "</Relationships>",
+                '<Relationship Id="rId12" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide5.xml"/></Relationships>'
+            )
+        items["ppt/_rels/presentation.xml.rels"] = prels.encode("utf-8")
+
+        # Add media, slide5.xml, slide5.xml.rels, notesSlide5.xml, notesSlide5.xml.rels
+        items["ppt/media/ghosh_slide5.png"] = slide5_png.read_bytes()
+        items["ppt/slides/slide5.xml"] = _make_full_bleed_slide_xml("rId3")
+        items["ppt/slides/_rels/slide5.xml.rels"] = (
+            "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide5.xml"/>'
+            '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/ghosh_slide5.png"/>'
+            "</Relationships>"
+        ).encode("utf-8")
+        items["ppt/notesSlides/notesSlide5.xml"] = _make_notes_xml(
+            "Core-Multishell Reaction-Diffusion and Microfluidic Single-Cell Classification. "
+            "Shells represent simulated concentration fields (:predicted), not observed physical layers."
+        )
+        items["ppt/notesSlides/_rels/notesSlide5.xml.rels"] = (
+            "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster" Target="../notesMasters/notesMaster1.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="../slides/slide5.xml"/>'
+            "</Relationships>"
+        ).encode("utf-8")
+
+        with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+            for k, v in items.items():
+                zout.writestr(k, v)
+        shutil.copyfile(tmp_zip, pptx_path)
+
+    # Rebuild 5-page PDF from previews Ghosh_Bridge_Slide_1..5.png
+    slide_pngs = [PREV_DIR / f"Ghosh_Bridge_Slide_{i}.png" for i in range(1, 6)]
+    pil_imgs = [Image.open(p).convert("RGB") for p in slide_pngs]
+    pil_imgs[0].save(str(pdf_path), "PDF", resolution=144.0, save_all=True, append_images=pil_imgs[1:])
+
+
+def build_jack_pptx_and_pdf(base_pptx: Path, jack_png: Path, jack_pptx: Path, jack_pdf: Path):
+    """Build 1-slide exploratory deck and PDF for Iain Jack's interfacial rheology adaptation."""
+    with zipfile.ZipFile(base_pptx, "r") as zin:
+        items = {n: zin.read(n) for n in zin.namelist()}
+
+    # Strip slides 2..5 so Jack deck is a clean 1-slide deck
+    for rm_idx in (2, 3, 4, 5):
+        for pat in (
+            f"ppt/slides/slide{rm_idx}.xml",
+            f"ppt/slides/_rels/slide{rm_idx}.xml.rels",
+            f"ppt/notesSlides/notesSlide{rm_idx}.xml",
+            f"ppt/notesSlides/_rels/notesSlide{rm_idx}.xml.rels",
+        ):
+            items.pop(pat, None)
+    items.pop("ppt/media/ghosh_slide5.png", None)
+
+    ct = items["[Content_Types].xml"].decode("utf-8")
+    if 'Extension="png"' not in ct:
+        ct = ct.replace(
+            '<Default Extension="jpeg" ContentType="image/jpeg"/>',
+            '<Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="png" ContentType="image/png"/>'
+        )
+    for rm_idx in (2, 3, 4, 5):
+        ct = ct.replace(
+            f'<Override PartName="/ppt/slides/slide{rm_idx}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>',
+            ""
+        )
+        ct = ct.replace(
+            f'<Override PartName="/ppt/notesSlides/notesSlide{rm_idx}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>',
+            ""
+        )
+    items["[Content_Types].xml"] = ct.encode("utf-8")
+
+    pres = items["ppt/presentation.xml"].decode("utf-8")
+    for tag in (
+        '<p:sldId id="257" r:id="rId9"/>',
+        '<p:sldId id="258" r:id="rId10"/>',
+        '<p:sldId id="259" r:id="rId11"/>',
+        '<p:sldId id="260" r:id="rId12"/>',
+    ):
+        pres = pres.replace(tag, "")
+    items["ppt/presentation.xml"] = pres.encode("utf-8")
+
+    prels = items["ppt/_rels/presentation.xml.rels"].decode("utf-8")
+    for rid, snum in (("rId9", 2), ("rId10", 3), ("rId11", 4), ("rId12", 5)):
+        prels = prels.replace(
+            f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{snum}.xml"/>',
+            ""
+        )
+    items["ppt/_rels/presentation.xml.rels"] = prels.encode("utf-8")
+
+    items["ppt/media/jack_slide1.png"] = jack_png.read_bytes()
+    items["ppt/slides/slide1.xml"] = _make_full_bleed_slide_xml("rId3")
+    items["ppt/slides/_rels/slide1.xml.rels"] = (
+        "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>'
+        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/>'
+        '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/jack_slide1.png"/>'
+        "</Relationships>"
+    ).encode("utf-8")
+    items["ppt/notesSlides/notesSlide1.xml"] = _make_notes_xml(
+        "Interface-Resolved Emulsion Dynamics: From Constitutive Rheology to Multiphase Flow. "
+        "Reuses 3D wireframe/core rendering infrastructure for bitumen emulsion droplets under shear without biological release shell assumptions."
+    )
+
+    with zipfile.ZipFile(jack_pptx, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        for k, v in items.items():
+            zout.writestr(k, v)
+
+    img = Image.open(jack_png).convert("RGB")
+    img.save(str(jack_pdf), "PDF", resolution=144.0)
+
+
+def main():
+    ghosh_slide5_png = PREV_DIR / "Ghosh_Bridge_Slide_5.png"
+    jack_slide1_png = PREV_DIR / "Jack_Emulsion_Interface_Slide_1.png"
+
+    render_ghosh_slide_5_png(ghosh_slide5_png)
+    render_jack_slide_1_png(jack_slide1_png)
+
+    ghosh_pptx = PRES_DIR / "Single_Cell_Flow_Cytometry_Model_Bridge_Exploratory.pptx"
+    ghosh_pdf = PRES_DIR / "Single_Cell_Flow_Cytometry_Model_Bridge_Exploratory.pdf"
+    update_ghosh_pptx_and_pdf(ghosh_slide5_png, ghosh_pptx, ghosh_pdf)
+
+    jack_pptx = PRES_DIR / "Interface_Resolved_Emulsion_Dynamics_Exploratory.pptx"
+    jack_pdf = PRES_DIR / "Interface_Resolved_Emulsion_Dynamics_Exploratory.pdf"
+    build_jack_pptx_and_pdf(ghosh_pptx, jack_slide1_png, jack_pptx, jack_pdf)
+
+    r_ghosh = PdfReader(str(ghosh_pdf))
+    r_jack = PdfReader(str(jack_pdf))
+    print(f"Built {ghosh_pptx.name} (5 slides) and {ghosh_pdf.name} ({len(r_ghosh.pages)} pages)")
+    print(f"Built {jack_pptx.name} (1 slide) and {jack_pdf.name} ({len(r_jack.pages)} page)")
+
+
+if __name__ == "__main__":
+    main()

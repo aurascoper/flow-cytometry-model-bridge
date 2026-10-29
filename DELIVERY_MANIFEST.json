@@ -1,20 +1,28 @@
 {
-  "package_name": "Flow Cytometry Model Bridge Complete Delivery Bundle",
+  "package_name": "Flow Cytometry + Microfluidic Classification Engine & Model Bridge Complete Delivery Bundle",
   "created_date": "2026-10-29",
   "verification": {
     "main_presentation_slide_count": 22,
     "main_presentation_original_slide_count": 20,
     "original_first_20_slide_text_exact_match": true,
-    "separate_ghosh_discussion_slide_count": 4,
+    "separate_ghosh_discussion_slide_count": 5,
+    "separate_jack_discussion_slide_count": 1,
     "main_presentation_pdf_page_count": 22,
-    "ghosh_presentation_pdf_page_count": 4,
+    "ghosh_presentation_pdf_page_count": 5,
+    "jack_presentation_pdf_page_count": 1,
     "julia_tests_executed": true,
+    "python_reference_verification_executed": true,
     "integrated_into_existing_openfoam_phreeqc_solvers": false,
     "julia_version": "1.13.1",
-    "julia_test_command": "julia --startup-file=no code/test_FlowCytometryObservationModel.jl",
-    "julia_test_passed": 118,
-    "julia_test_total": 118,
+    "julia_test_command": "julia --startup-file=no code/test_FlowCytometryObservationModel.jl && julia --startup-file=no code/test_MicrofluidicClassificationEngine.jl",
+    "julia_observation_model_test_passed": 118,
+    "julia_observation_model_test_total": 118,
+    "julia_classification_engine_test_passed": 606,
+    "julia_classification_engine_test_total": 606,
+    "julia_test_passed": 724,
+    "julia_test_total": 724,
     "model_adapter_version": "0.2.0",
+    "microfluidic_engine_version": "0.2.0",
     "priorities_implemented": [
       "Priority 1: Observation-model specification and volume-convention MLE consistency",
       "Priority 2: Synthetic-data simulation and parameter recovery",
@@ -22,14 +30,15 @@
       "Priority 4: Uncertainty propagation and identifiability / equifinality analysis",
       "Priority 5: Held-out validation and posterior-predictive checks",
       "Priority 6: Solver interface contracts and 3-track boundary enforcement",
-      "Priority 7: Production acceptance audit record and epistemic status separation"
+      "Priority 7: Production acceptance audit record and epistemic status separation",
+      "Priority 8: MicrofluidicClassificationEngine (FCSIO, CytometryAnalysis, CellClassifier, MicrofluidicBridge, SharedVisualizationPhysics) and interactive browser workbench"
     ]
   },
   "files": [
     {
       "path": "README_DELIVERY.md",
-      "bytes": 3838,
-      "sha256": "a8ed975ebc1a52e20956c221688c7cb84d81f430acd8b0adbd3d221f5e876f09"
+      "bytes": 7604,
+      "sha256": "822ab3143398d368919a10c579738eb92fbfadd430c676324683d0e656e65c6f"
     },
     {
       "path": "code/FlowCytometryObservationModel.jl",
@@ -37,14 +46,34 @@
       "sha256": "893aff3a7646276c18456aefd395e0b8aa85a446add9d9cb84e8d512d5091f46"
     },
     {
+      "path": "code/MicrofluidicClassificationEngine.jl",
+      "bytes": 124861,
+      "sha256": "6184c6ca633ee49c4cceb73536df02761e13ae65ab48054ac6ae713fc29b0155"
+    },
+    {
       "path": "code/flow_cytometry_samples_template.csv",
       "bytes": 242,
       "sha256": "f68fd9fa7cea6dfed84e0f62c745b4da465a6ad0b96917a58598004fa8431a79"
     },
     {
+      "path": "code/sample_nanobio_chip01.fcs",
+      "bytes": 9472,
+      "sha256": "110a48daaa3a75d5cc9af000f316489a5b588ddbe859e8d043b77369343361bc"
+    },
+    {
       "path": "code/test_FlowCytometryObservationModel.jl",
       "bytes": 24160,
       "sha256": "f16f8381c4c6bbe6f47f96ca12656cd4808e3b7350834fb834e0a4777ca4f2a0"
+    },
+    {
+      "path": "code/test_MicrofluidicClassificationEngine.jl",
+      "bytes": 30612,
+      "sha256": "36d0a4d16a01015a660eec67c93daa2be286d3326aca89d5e16216e52e46179b"
+    },
+    {
+      "path": "code/verify_against_python_reference.py",
+      "bytes": 15897,
+      "sha256": "912525657ea9f771bf44f64046b27a81ad602cf79ce54ade44d7d05eadecc2d1"
     },
     {
       "path": "docs/build_flow_cytometry_addendum.py",
@@ -53,8 +82,8 @@
     },
     {
       "path": "docs/build_ghosh_fcm_bridge_deck.py",
-      "bytes": 11578,
-      "sha256": "123d3aaca497afdd0847c2a5038b890481370ea21861f5a05883ea55ddfca584"
+      "bytes": 24400,
+      "sha256": "a2606dbaa229e12be31c51d93ab0ac77858facf0d0e5958ed93752fafb43c4b9"
     },
     {
       "path": "docs/clay_polymer_infrastructure_epistemic_synthesis.md",
@@ -63,8 +92,8 @@
     },
     {
       "path": "docs/flow_cytometry_model_bridge_spec.md",
-      "bytes": 16857,
-      "sha256": "24dda551c5cb37f6991a0daaace4ee6e4c1ba8bcbbaf02fa21bfcacb3f8096cb"
+      "bytes": 21383,
+      "sha256": "88098958c8d808b0d6b738b47ae0f11b77211e62e017fded0c7750e0e2659cd1"
     },
     {
       "path": "presentations/Clay_Microbes_Metal_22slides_Flow_Cytometry_Addendum.pdf",
@@ -77,14 +106,24 @@
       "sha256": "7a68b9f2028fdeabb269e20fd736fa9f1cd77af24b82d19a69598ea346823f97"
     },
     {
+      "path": "presentations/Interface_Resolved_Emulsion_Dynamics_Exploratory.pdf",
+      "bytes": 144265,
+      "sha256": "6aeea2b6d0c9c0967556fff3122585bdc3215fe7f59efec6eb782f714ff5034f"
+    },
+    {
+      "path": "presentations/Interface_Resolved_Emulsion_Dynamics_Exploratory.pptx",
+      "bytes": 215634,
+      "sha256": "7c960c0805b8c8b196713a8f7951120cc1cba97e1beeb27d8bb06836ff922891"
+    },
+    {
       "path": "presentations/Single_Cell_Flow_Cytometry_Model_Bridge_Exploratory.pdf",
-      "bytes": 221444,
-      "sha256": "98fa4792bd6d35bff9ed54fab9e3430839cf8b59d4cfe7d860c1e48f407cde67"
+      "bytes": 645474,
+      "sha256": "ef2b7595571aab84678d9dfb8d31645b7c7dd7b1f15a2fac19e54c4a489cff63"
     },
     {
       "path": "presentations/Single_Cell_Flow_Cytometry_Model_Bridge_Exploratory.pptx",
-      "bytes": 46742,
-      "sha256": "b2c8a807387f1e7be5372e2ed2d1fba0d7a7b5a68255e2e92b7597b7f65ee90b"
+      "bytes": 258173,
+      "sha256": "7a90d4f4b6a003ced8c487008484fb5096b9e0b7d1e3158e80946fe21a60568f"
     },
     {
       "path": "previews/Appendix_Slide_21_Flow_Cytometry.png",
@@ -117,9 +156,24 @@
       "sha256": "e6089ed62725515eddf1f6d9eb1a7288cf322f6e2b4017e4765e62de0a84a28a"
     },
     {
+      "path": "previews/Ghosh_Bridge_Slide_5.png",
+      "bytes": 219759,
+      "sha256": "873704178c7f236e25170ee0481017fdb8db62b4fdf22ccd06c5b3c2c262fec3"
+    },
+    {
+      "path": "previews/Jack_Emulsion_Interface_Slide_1.png",
+      "bytes": 193570,
+      "sha256": "285bc87086a10d858a8a43060bcb504aa30fdaf8b8719e4dfcb30e6e13cc26ec"
+    },
+    {
       "path": "source/Original_20_slide_Clay_Microbes_Metal_Deck.pptx",
       "bytes": 12641999,
       "sha256": "761c99b8047aa248771632747c79cc7a9c7b59c07b22cc36b8a34406445ebb36"
+    },
+    {
+      "path": "workbench/microfluidic_cytometry_workbench.html",
+      "bytes": 80589,
+      "sha256": "b8ee6490885948d6791f681cd3f4568b54b15f66aa9d66a65bf6cfe74c675ed0"
     }
   ]
 }

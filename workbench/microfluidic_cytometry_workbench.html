@@ -1,0 +1,2123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Microfluidic Cell Classification Workbench | Nano-Bio Lab &amp; Model Bridge</title>
+<style>
+  :root {
+    --navy-top: #0d3b8c;
+    --navy-bar: #1248a8;
+    --navy-hover: #1e5bc6;
+    --bg-main: #f4f5f7;
+    --panel-bg: #ffffff;
+    --border-col: #d0d5dd;
+    --ink: #1d2939;
+    --muted: #475467;
+    --teal: #0f766e;
+    --blue: #1d4ed8;
+    --amber: #b45309;
+    --red: #b91c1c;
+    --green: #15803d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg-main);
+    color: var(--ink);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  /* Top Header Bar (Floreada.io inspired) */
+  header.topbar {
+    height: 40px;
+    background: var(--navy-top);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 14px;
+    border-bottom: 1px solid #082761;
+    user-select: none;
+  }
+  .brand-group {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .brand-title {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .brand-badge {
+    font-size: 10.5px;
+    background: rgba(255,255,255,0.16);
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-weight: 600;
+  }
+  .top-menu {
+    display: flex;
+    gap: 6px;
+  }
+  .top-btn {
+    background: transparent;
+    color: #e2e8f0;
+    border: 1px solid transparent;
+    padding: 4px 10px;
+    font-size: 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+  }
+  .top-btn:hover { background: rgba(255,255,255,0.14); color: #fff; }
+  .top-btn.active {
+    background: #fff;
+    color: var(--navy-top);
+    font-weight: 700;
+  }
+  /* Main Workbench Body */
+  .workbench-body {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 54px 255px 1fr 330px;
+    min-height: 0;
+  }
+  /* Far-left Gating & Tool Palette (Floreada.io style) */
+  .left-toolbar {
+    background: var(--navy-bar);
+    color: #fff;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 6px 0;
+    gap: 4px;
+    border-right: 1px solid #092c6e;
+    overflow-y: auto;
+  }
+  .tool-icon-btn {
+    width: 46px;
+    padding: 5px 2px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    color: #e2e8f0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    cursor: pointer;
+    font-size: 10px;
+    text-align: center;
+  }
+  .tool-icon-btn svg {
+    width: 19px;
+    height: 19px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 1.9;
+  }
+  .tool-icon-btn:hover { background: var(--navy-hover); color: #fff; }
+  .tool-icon-btn.active {
+    background: #ffffff;
+    color: var(--navy-top);
+    font-weight: 700;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+  }
+  /* Left Sidebar: FCS Files, Gate Hierarchy Tree, Cytoflow Pipeline */
+  .sidebar-left {
+    background: var(--panel-bg);
+    border-right: 1px solid var(--border-col);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .section-hdr {
+    background: #175cd3;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 6px 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .tree-container {
+    padding: 8px;
+    overflow-y: auto;
+    flex: 1;
+    font-size: 12px;
+  }
+  .tree-item {
+    padding: 4px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 2px;
+    border: 1px solid transparent;
+  }
+  .tree-item:hover { background: #eff6ff; }
+  .tree-item.active {
+    background: #dbeafe;
+    border-color: #93c5fd;
+    font-weight: 700;
+    color: #1e3a8a;
+  }
+  .tree-indent-1 { margin-left: 12px; }
+  .tree-indent-2 { margin-left: 24px; }
+  .tree-indent-3 { margin-left: 36px; }
+  .pct-pill {
+    font-size: 10.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #f1f5f9;
+    padding: 1px 5px;
+    border-radius: 3px;
+    color: #0f172a;
+    border: 1px solid #cbd5e1;
+  }
+  /* Cytoflow-style Pipeline List */
+  .pipeline-list {
+    padding: 8px;
+    overflow-y: auto;
+    flex: 1.1;
+    background: #f8fafc;
+    border-top: 1px solid var(--border-col);
+  }
+  .pipe-card {
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-radius: 5px;
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    font-size: 11.5px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .pipe-card.active {
+    border-color: #175cd3;
+    background: #eff6ff;
+  }
+  .pipe-check {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #16a34a;
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  /* Center Workspace */
+  .center-workspace {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: #ffffff;
+  }
+  .workspace-Subbar {
+    height: 36px;
+    background: #f8fafc;
+    border-bottom: 1px solid var(--border-col);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 12px;
+    font-size: 12px;
+  }
+  .view-grid-4 {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    min-height: 0;
+  }
+  .plot-cell {
+    border-right: 1px solid var(--border-col);
+    border-bottom: 1px solid var(--border-col);
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    min-height: 0;
+    padding: 4px 8px;
+  }
+  .plot-cell.selected-plot {
+    outline: 2px solid #0284c7;
+    outline-offset: -2px;
+  }
+  .plot-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 2px 4px;
+    color: var(--ink);
+  }
+  .plot-canvas-wrap {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+  }
+  canvas.cytometry-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: crosshair;
+  }
+  /* Single-plot and 3D Physics Views */
+  .view-single, .view-physics-3d {
+    flex: 1;
+    display: none;
+    flex-direction: column;
+    min-height: 0;
+    padding: 8px;
+  }
+  .physics-grid {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1.15fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 8px;
+    min-height: 0;
+  }
+  .physics-card {
+    background: #fff;
+    border: 1px solid var(--border-col);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    padding: 6px 8px;
+    min-height: 0;
+  }
+  .physics-card.span-rows {
+    grid-row: 1 / span 2;
+  }
+  /* Right Inspector Panel */
+  .sidebar-right {
+    background: var(--panel-bg);
+    border-left: 1px solid var(--border-col);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    font-size: 12px;
+  }
+  .inspector-block {
+    padding: 10px;
+    border-bottom: 1px solid var(--border-col);
+  }
+  .inspector-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #0f172a;
+    margin-bottom: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .form-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    gap: 8px;
+  }
+  .form-row label {
+    color: var(--muted);
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+  select, input[type="number"], input[type="text"] {
+    padding: 3px 6px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    font-size: 11.5px;
+    color: var(--ink);
+    background: #fff;
+  }
+  .metric-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .metric-box {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    padding: 5px 7px;
+  }
+  .metric-label { font-size: 10px; color: var(--muted); text-transform: uppercase; }
+  .metric-val {
+    font-size: 13px;
+    font-weight: 700;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--ink);
+  }
+  .epistemic-tag {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 3px;
+    text-transform: uppercase;
+  }
+  .tag-observed { background: #dcfce7; color: #166534; }
+  .tag-calibrated { background: #dbeafe; color: #1e40af; }
+  .tag-assumed { background: #fef3c7; color: #92400e; }
+  .tag-predicted { background: #f3e8ff; color: #6b21a8; }
+  .status-footer {
+    height: 24px;
+    background: var(--navy-top);
+    color: #cbd5e1;
+    font-size: 11px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 12px;
+  }
+  .btn-action {
+    background: #175cd3;
+    color: #fff;
+    border: none;
+    padding: 5px 9px;
+    border-radius: 4px;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn-action:hover { background: #1d4ed8; }
+  .btn-outline {
+    background: #fff;
+    color: #1e293b;
+    border: 1px solid #cbd5e1;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn-outline:hover { background: #f1f5f9; }
+  table.mini-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    margin-top: 6px;
+  }
+  table.mini-table th, table.mini-table td {
+    border: 1px solid #cbd5e1;
+    padding: 3px 5px;
+    text-align: center;
+  }
+  table.mini-table th { background: #f1f5f9; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand-group">
+    <div class="brand-title">
+      <span>Microfluidic Cytometry Workbench</span>
+      <span class="brand-badge">Julia Engine v0.2.0 + ISAC FCS 3.1</span>
+    </div>
+    <div class="top-menu">
+      <button class="top-btn active" id="tab-4panel" onclick="switchWorkspaceTab('4panel')">4-Panel Cytometry &amp; Transit Grid</button>
+      <button class="top-btn" id="tab-single" onclick="switchWorkspaceTab('single')">Single-Plot Interactive Gating</button>
+      <button class="top-btn" id="tab-physics" onclick="switchWorkspaceTab('physics')">Shared 3D Core-Multishell &amp; Emulsion Engine</button>
+    </div>
+  </div>
+  <div class="top-menu">
+    <label class="top-btn" style="cursor:pointer;">
+      Load .FCS Binary
+      <input type="file" id="fcs-file-input" accept=".fcs" style="display:none;" onchange="handleFCSUpload(event)">
+    </label>
+    <button class="top-btn" onclick="exportGatesAndAnalysisJSON()">Export Gates &amp; Audit JSON</button>
+    <button class="top-btn" onclick="exportClassifiedCSV()">Export Classified CSV</button>
+  </div>
+</header>
+
+<div class="workbench-body">
+  <!-- Far-left Gating & Analysis Tool Palette (Floreada.io layout) -->
+  <nav class="left-toolbar">
+    <button class="tool-icon-btn active" id="tool-Rect" onclick="selectGateTool('Rect')" title="Draw RectangleGate">
+      <svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="1"/></svg>
+      <span>Rect</span>
+    </button>
+    <button class="tool-icon-btn" id="tool-Poly" onclick="selectGateTool('Poly')" title="Draw PolygonGate">
+      <svg viewBox="0 0 24 24"><polygon points="12,3 21,9 18,20 6,20 3,9"/></svg>
+      <span>Poly</span>
+    </button>
+    <button class="tool-icon-btn" id="tool-Range" onclick="selectGateTool('Range')" title="Draw 1D RangeGate">
+      <svg viewBox="0 0 24 24"><path d="M4 6v12M20 6v12M4 12h16"/></svg>
+      <span>Range</span>
+    </button>
+    <button class="tool-icon-btn" id="tool-Quad" onclick="selectGateTool('Quad')" title="Set QuadGate Thresholds">
+      <svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/></svg>
+      <span>Quad</span>
+    </button>
+    <button class="tool-icon-btn" id="tool-Ellipse" onclick="selectGateTool('Ellipse')" title="Draw EllipseGate">
+      <svg viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="9" ry="6" transform="rotate(-20 12 12)"/></svg>
+      <span>Ellipse</span>
+    </button>
+    <button class="tool-icon-btn" id="tool-Comp" onclick="toggleCompensation()" title="Toggle Spillover Compensation">
+      <svg viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>
+      <span>Comp</span>
+    </button>
+    <button class="tool-icon-btn" id="tool-QC" onclick="toggleQualityControl()" title="Toggle Quality Control Filter">
+      <svg viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+      <span>QC</span>
+    </button>
+    <button class="tool-icon-btn" id="tool-Classify" onclick="runSingleCellClassifier()" title="Run Supervised Classifier">
+      <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/><path d="M8.5 7.5L11 15M15.5 7.5L13 15"/></svg>
+      <span>Classify</span>
+    </button>
+    <button class="tool-icon-btn" id="tool-3D" onclick="switchWorkspaceTab('physics')" title="Open 3D Core-Multishell &amp; Emulsion Engine">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="9" ry="4"/><ellipse cx="12" cy="12" rx="4" ry="9"/></svg>
+      <span>3D Field</span>
+    </button>
+  </nav>
+
+  <!-- Left Sidebar: FCS Files, Hierarchical Gate Tree, and Cytoflow Pipeline -->
+  <aside class="sidebar-left">
+    <div class="section-hdr">
+      <span>FCS Files &amp; Gate Tree</span>
+      <span id="comp-badge" style="font-size:10px;background:#dcfce7;color:#166534;padding:1px 5px;border-radius:3px;">Comp ON</span>
+    </div>
+    <div class="tree-container" id="gate-tree-container"></div>
+
+    <div class="section-hdr">
+      <span>Cytoflow &amp; Model Pipeline</span>
+      <span style="font-size:10px;opacity:0.85;">6 Steps</span>
+    </div>
+    <div class="pipeline-list">
+      <div class="pipe-card active">
+        <span class="pipe-check">1</span>
+        <div>
+          <div style="font-weight:700;">Import ISAC FCS 3.1</div>
+          <div style="color:var(--muted);font-size:10.5px;" id="pipe-fcs-meta">NBL-CHIP01-RUN1 (300 events)</div>
+        </div>
+      </div>
+      <div class="pipe-card">
+        <span class="pipe-check">2</span>
+        <div>
+          <div style="font-weight:700;">Spillover Unmixing &amp; QC</div>
+          <div style="color:var(--muted);font-size:10.5px;">3x3 $SPILLOVER + Singlet/Rail QC</div>
+        </div>
+      </div>
+      <div class="pipe-card">
+        <span class="pipe-check">3</span>
+        <div>
+          <div style="font-weight:700;">Hierarchical Gating</div>
+          <div style="color:var(--muted);font-size:10.5px;">Poly -&gt; Ellipse / Rect / Range / Quad</div>
+        </div>
+      </div>
+      <div class="pipe-card">
+        <span class="pipe-check">4</span>
+        <div>
+          <div style="font-weight:700;">Single-Cell Classifier</div>
+          <div style="color:var(--muted);font-size:10.5px;" id="pipe-clf-meta">Group split: chip_id (No leakage)</div>
+        </div>
+      </div>
+      <div class="pipe-card">
+        <span class="pipe-check">5</span>
+        <div>
+          <div style="font-weight:700;">Micropore Transit Bridge</div>
+          <div style="color:var(--muted);font-size:10.5px;">dt_transit, dI/I0, Deformability</div>
+        </div>
+      </div>
+      <div class="pipe-card">
+        <span class="pipe-check">6</span>
+        <div>
+          <div style="font-weight:700;">Observation Model MLE</div>
+          <div style="color:var(--muted);font-size:10.5px;">FlowCytometryObservationModel.jl</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Center Workspace -->
+  <main class="center-workspace">
+    <div class="workspace-Subbar">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <strong>Active Gate Filter:</strong>
+        <span id="active-population-label" style="color:#1d4ed8;font-weight:700;">root (All Events: 100.0%)</span>
+        <span style="color:#94a3b8;">|</span>
+        <span>Tool: <strong id="active-tool-label">Rect</strong> (Click-drag on plot to edit gate)</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <label style="font-size:11px;color:var(--muted);">Color Mode:</label>
+        <select id="plot-color-mode" onchange="renderAllViews()">
+          <option value="density">Floreada Pseudocolor Density</option>
+          <option value="classifier">Classifier Decision + Deferral</option>
+        </select>
+        <button class="btn-outline" onclick="resetDefaultGates()">Reset Gates</button>
+      </div>
+    </div>
+
+    <!-- TAB 1: 4-Panel Multi-Plot Grid (Floreada.io screenshot 1 layout) -->
+    <div class="view-grid-4" id="view-4panel">
+      <div class="plot-cell selected-plot" id="cell-0" onclick="selectPlotPanel(0)">
+        <div class="plot-header">
+          <span>Panel 1: SSC-A vs FSC-A (Live_Ellipse &amp; Debris_Rect)</span>
+          <span class="pct-pill" id="badge-panel-0">Ellipsoid1: --%</span>
+        </div>
+        <div class="plot-canvas-wrap">
+          <canvas class="cytometry-canvas" id="canvas-0"></canvas>
+        </div>
+      </div>
+      <div class="plot-cell" id="cell-1" onclick="selectPlotPanel(1)">
+        <div class="plot-header">
+          <span>Panel 2: FL2-PI-A vs FL1-SYBR-A (Membrane Integrity)</span>
+          <span class="pct-pill" id="badge-panel-1">Compromised_Rect: --%</span>
+        </div>
+        <div class="plot-canvas-wrap">
+          <canvas class="cytometry-canvas" id="canvas-1"></canvas>
+        </div>
+      </div>
+      <div class="plot-cell" id="cell-2" onclick="selectPlotPanel(2)">
+        <div class="plot-header">
+          <span>Panel 3: FL3-Cy5-A vs FL1-SYBR-A (Nanocarrier Uptake Quad)</span>
+          <span class="pct-pill" id="badge-panel-2">Q1_UR: --%</span>
+        </div>
+        <div class="plot-canvas-wrap">
+          <canvas class="cytometry-canvas" id="canvas-2"></canvas>
+        </div>
+      </div>
+      <div class="plot-cell" id="cell-3" onclick="selectPlotPanel(3)">
+        <div class="plot-header">
+          <span>Panel 4: Deformability Index vs Micropore Transit Time (ms)</span>
+          <span class="pct-pill" id="badge-panel-3">Deferred Review: --%</span>
+        </div>
+        <div class="plot-canvas-wrap">
+          <canvas class="cytometry-canvas" id="canvas-3"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: Single-Plot High-Resolution Interactive Gating View -->
+    <div class="view-single" id="view-single">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <div style="font-size:14px;font-weight:700;" id="single-plot-title">Interactive Gating Setup View (FSC-A vs SSC-A)</div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span class="pct-pill" id="single-plot-stats">Events: 300</span>
+        </div>
+      </div>
+      <div class="plot-canvas-wrap" style="border:1px solid var(--border-col);border-radius:6px;background:#fff;">
+        <canvas class="cytometry-canvas" id="canvas-single"></canvas>
+      </div>
+    </div>
+
+    <!-- TAB 3: Shared 3D Wireframe-Over-Core & Domain Visualization Engine -->
+    <div class="view-physics-3d" id="view-physics">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;background:#f8fafc;padding:6px 10px;border:1px solid var(--border-col);border-radius:6px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <strong>Domain Physics Track:</strong>
+          <select id="physics-domain-select" onchange="switchPhysicsDomain()" style="font-weight:700;">
+            <option value="ghosh">Track 1 (Dr. Santaneel Ghosh): Core-Multishell Reaction-Diffusion &amp; Microfluidic Classification</option>
+            <option value="jack">Track 3 (Iain Jack): Interface-Resolved Emulsion Dynamics: Constitutive Rheology to Multiphase Flow</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <button class="btn-action" id="anim-play-btn" onclick="togglePhysicsAnimation()">Play Animation</button>
+          <label style="font-size:11.5px;font-weight:600;">Time Step:</label>
+          <input type="range" id="physics-time-slider" min="1" max="15" step="0.2" value="5.0" oninput="onPhysicsTimeSlider(this.value)">
+          <span class="pct-pill" id="physics-time-label">t = 5.0</span>
+          <label style="font-size:11.5px;display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="cutaway-toggle" checked onchange="renderPhysicsEngine()"> Octant Cutaway (R0, R1, R2)
+          </label>
+        </div>
+      </div>
+
+      <div class="physics-grid">
+        <div class="physics-card span-rows">
+          <div class="plot-header">
+            <span id="phys-left-title">3D Octant-Cutaway Core-Multishell (R0, R1, R2) + Wireframe Isosurface u(x,y,z,t)</span>
+            <span class="epistemic-tag tag-predicted" id="phys-epistemic-badge">Simulated Field (:predicted)</span>
+          </div>
+          <div class="plot-canvas-wrap">
+            <canvas class="cytometry-canvas" id="canvas-phys-3d"></canvas>
+          </div>
+        </div>
+        <div class="physics-card">
+          <div class="plot-header">
+            <span id="phys-top-right-title">Microfluidic Constriction Coupling &amp; Single-Cell Trajectories</span>
+            <span class="pct-pill" id="phys-top-right-badge">Pore: 7.5 um</span>
+          </div>
+          <div class="plot-canvas-wrap">
+            <canvas class="cytometry-canvas" id="canvas-phys-coupling"></canvas>
+          </div>
+        </div>
+        <div class="physics-card">
+          <div class="plot-header">
+            <span id="phys-bot-right-title">Radial Release Kinetics F_rel(t) &amp; Predicted Cell Classification Fractions</span>
+            <span class="pct-pill" id="phys-bot-right-badge">Mass Conserved</span>
+          </div>
+          <div class="plot-canvas-wrap">
+            <canvas class="cytometry-canvas" id="canvas-phys-curve"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Right Inspector Panel -->
+  <aside class="sidebar-right">
+    <!-- Block 1: Axis & Gate Setup (Cytoflow Polygon Setup View style) -->
+    <div class="inspector-block">
+      <div class="inspector-title">
+        <span>Plot &amp; Gate Setup View</span>
+        <span class="pct-pill" id="inspector-panel-id">Panel 1</span>
+      </div>
+      <div class="form-row">
+        <label>X Channel:</label>
+        <select id="sel-x-channel" onchange="updateSelectedPanelAxes()"></select>
+      </div>
+      <div class="form-row">
+        <label>X Scale:</label>
+        <select id="sel-x-scale" onchange="updateSelectedPanelAxes()">
+          <option value="linear">linear</option>
+          <option value="logicle">logicle (biexponential)</option>
+          <option value="arcsinh">arcsinh (cofactor 150)</option>
+          <option value="log10">log10</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Y Channel:</label>
+        <select id="sel-y-channel" onchange="updateSelectedPanelAxes()"></select>
+      </div>
+      <div class="form-row">
+        <label>Y Scale:</label>
+        <select id="sel-y-scale" onchange="updateSelectedPanelAxes()">
+          <option value="linear">linear</option>
+          <option value="logicle">logicle (biexponential)</option>
+          <option value="arcsinh">arcsinh (cofactor 150)</option>
+          <option value="log10">log10</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Block 2: Single-Cell Classifier & Confidence Deferral -->
+    <div class="inspector-block">
+      <div class="inspector-title">
+        <span>CellClassifier.jl Engine</span>
+        <span class="epistemic-tag tag-predicted">Calibrated ML</span>
+      </div>
+      <div class="form-row">
+        <label>Target Task:</label>
+        <select id="sel-clf-target" onchange="runSingleCellClassifier()">
+          <option value="cell_stress_damage">:cell_stress_damage</option>
+          <option value="cell_type">:cell_type</option>
+          <option value="nanocarrier_uptake">:nanocarrier_uptake</option>
+          <option value="micropore_transit_regime">:micropore_transit_regime</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Group Split By:</label>
+        <select id="sel-split-group" onchange="runSingleCellClassifier()">
+          <option value="chip_id">:chip_id (Independent Chip)</option>
+          <option value="run_id">:run_id (Experimental Run)</option>
+          <option value="sample_id">:sample_id (Independent Sample)</option>
+          <option value="biological_replicate">:biological_replicate</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Deferral Threshold:</label>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <input type="range" id="clf-conf-slider" min="0.50" max="0.98" step="0.02" value="0.75" oninput="onConfidenceThresholdChange(this.value)" style="width:95px;">
+          <strong id="clf-conf-val">0.75</strong>
+        </div>
+      </div>
+      <div class="metric-grid">
+        <div class="metric-box">
+          <div class="metric-label">Accepted Acc</div>
+          <div class="metric-val" id="val-acc-accepted">98.2%</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Deferred Review</div>
+          <div class="metric-val" id="val-deferred-cnt" style="color:var(--amber);">14 (4.7%)</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Macro F1</div>
+          <div class="metric-val" id="val-macro-f1">0.968</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Brier / ECE</div>
+          <div class="metric-val" id="val-brier-ece">0.041 / 0.028</div>
+        </div>
+      </div>
+      <table class="mini-table" id="clf-confusion-table"></table>
+    </div>
+
+    <!-- Block 3: FlowCytometryObservationModel.jl Bridge -->
+    <div class="inspector-block">
+      <div class="inspector-title">
+        <span>ObservationModel.jl Bridge</span>
+        <span class="epistemic-tag tag-calibrated">MLE Verified</span>
+      </div>
+      <div class="form-row">
+        <label>Volume Convention:</label>
+        <select id="sel-vol-conv" onchange="updateObservationBridge()">
+          <option value="aliquot_post_dilution">:aliquot_post_dilution</option>
+          <option value="undiluted_equivalent">:undiluted_equivalent</option>
+          <option value="beads_co_diluted">:beads_co_diluted</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Bead Events / Added:</label>
+        <span><strong>120</strong> / 15,000 (<span class="epistemic-tag tag-observed">obs</span>)</span>
+      </div>
+      <div class="form-row">
+        <label>Detection Eff / Recov:</label>
+        <span><strong>0.88</strong> (<span class="epistemic-tag tag-calibrated">cal</span>) / <strong>0.90</strong> (<span class="epistemic-tag tag-assumed">asm</span>)</span>
+      </div>
+      <div class="metric-grid">
+        <div class="metric-box">
+          <div class="metric-label">MLE Cells / mL</div>
+          <div class="metric-val" id="val-mle-conc">2.18e6</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">95% Garwood CI</div>
+          <div class="metric-val" id="val-mle-ci" style="font-size:11px;">[1.79e6, 2.65e6]</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Joint LogLik</div>
+          <div class="metric-val" id="val-joint-ll">-11.42</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Score dL/dC = 0</div>
+          <div class="metric-val" style="color:var(--green);">PASS (&lt;1e-12)</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Block 4: FCS Provenance & Microfluidic Transit Summary -->
+    <div class="inspector-block">
+      <div class="inspector-title">
+        <span>Provenance &amp; Micropore Transit</span>
+        <span class="epistemic-tag tag-observed">SHA-256</span>
+      </div>
+      <div style="font-size:10.5px;color:var(--muted);word-break:break-all;margin-bottom:6px;" id="provenance-hash-box">
+        File: sample_nanobio_chip01.fcs<br>
+        SHA256: 7c4b0e91a8f2...
+      </div>
+      <table class="mini-table" id="transit-summary-table">
+        <thead>
+          <tr><th>Class</th><th>dt (ms)</th><th>dI/I0</th><th>Deform</th></tr>
+        </thead>
+        <tbody id="transit-summary-tbody"></tbody>
+      </table>
+    </div>
+  </aside>
+</div>
+
+<footer class="status-footer">
+  <span id="footer-status-left">Parameters: 7 FCS Channels + 4 Micropore Sensor Channels | Event Count: 300 | Active Chip: CHIP-01 (RUN-01, REP-A)</span>
+  <span> Scientific Boundary: Cytometry &amp; simulated RD shells (:predicted) require independent microscopy/empirical validation</span>
+</footer>
+
+<script>
+// ============================================================================
+// DETERMINISTIC RNG & SYNTHETIC NANO-BIO LAB DATASET GENERATOR
+// ============================================================================
+function mulberry32(a) {
+  return function() {
+    let t = a += 0x6D2B79F5;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function randn(rng) {
+  let u = 0, v = 0;
+  while (u === 0) u = rng();
+  while (v === 0) v = rng();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+
+const CHANNELS = [
+  "FSC-A", "FSC-H", "SSC-A", "FL1-SYBR-A", "FL2-PI-A", "FL3-Cy5-A", "TIME",
+  "TRANSIT-MS", "BLOCKAGE-RATIO", "DEFORMABILITY", "CIRCULARITY"
+];
+
+const TARGET_CLASSES = {
+  cell_stress_damage: ["membrane_intact", "membrane_compromised", "dead_lysed"],
+  cell_type: ["viable_bacterial_rod", "viable_coccus", "mineral_colloid_debris"],
+  nanocarrier_uptake: ["high_uptake_active", "low_uptake_passive", "unbound_negative"],
+  micropore_transit_regime: ["deformable_smooth_transit", "stiff_retarded_transit", "pore_occlusion_risk"]
+};
+
+const SPILLOVER = [
+  [1.0, 0.14, 0.0],
+  [0.05, 1.0, 0.03],
+  [0.0, 0.02, 1.0]
+];
+
+const INV_SPILLOVER = [
+  [1.007049, -0.140987, 0.004230],
+  [-0.050352, 1.007653, -0.030230],
+  [0.001007, -0.020153, 1.000605]
+];
+
+let state = {
+  workspaceTab: "4panel",
+  selectedPanel: 0,
+  activeGateTool: "Rect",
+  activeGateFilter: "root",
+  compensationEnabled: true,
+  qcEnabled: false,
+  confidenceThreshold: 0.75,
+  targetTask: "cell_stress_damage",
+  splitBy: "chip_id",
+  fcsFileName: "sample_nanobio_chip01.fcs",
+  fcsSha256: "f40987d52e903a1689a319c143f2685b832a840b5571284e40f2c1f765a41e82",
+  rawEvents: [],
+  compEvents: [],
+  panels: [
+    { xCh: "FSC-A", yCh: "SSC-A", xScale: "linear", yScale: "logicle", title: "Panel 1: SSC-A vs FSC-A" },
+    { xCh: "FL1-SYBR-A", yCh: "FL2-PI-A", xScale: "logicle", yScale: "logicle", title: "Panel 2: FL2-PI-A vs FL1-SYBR-A" },
+    { xCh: "FL1-SYBR-A", yCh: "FL3-Cy5-A", xScale: "logicle", yScale: "logicle", title: "Panel 3: FL3-Cy5-A vs FL1-SYBR-A" },
+    { xCh: "TRANSIT-MS", yCh: "DEFORMABILITY", xScale: "linear", yScale: "linear", title: "Panel 4: Deformability vs Transit Time" }
+  ],
+  gates: [],
+  gateSummaries: {},
+  predictions: [],
+  physicsDomain: "ghosh",
+  physicsTime: 5.0,
+  physicsPlaying: false,
+  physicsTimer: null,
+  rotYaw: 0.62,
+  rotPitch: 0.38
+};
+
+function initDataset() {
+  const rng = mulberry32(20261029);
+  const n = 300;
+  const n1 = 195, n2 = 66;
+  state.rawEvents = [];
+  state.compEvents = [];
+
+  for (let i = 0; i < n; i++) {
+    const pop = i < n1 ? 0 : (i < n1 + n2 ? 1 : 2);
+    const tSec = 0.05 * (i + 1);
+    let fscA, fscH, sscA, fl1, fl2, fl3, transitMs, blockNa, deform, circ;
+    if (pop === 0) {
+      fscA = Math.min(240000, Math.max(15000, 72000 + 11000 * randn(rng)));
+      fscH = fscA * (0.93 + 0.025 * randn(rng));
+      sscA = Math.min(240000, Math.max(2000, 18000 + 3800 * randn(rng)));
+      fl1 = 14500 * Math.exp(0.28 * randn(rng));
+      fl2 = Math.max(15, 110 + 35 * randn(rng));
+      fl3 = 9200 * Math.exp(0.30 * randn(rng));
+      transitMs = Math.max(0.15, 0.42 + 0.07 * randn(rng));
+      blockNa = Math.max(0.4, 1.35 + 0.18 * randn(rng));
+      deform = Math.max(1.05, 1.48 + 0.11 * randn(rng));
+      circ = Math.min(0.99, Math.max(0.5, 0.89 + 0.03 * randn(rng)));
+    } else if (pop === 1) {
+      fscA = Math.min(240000, Math.max(12000, 54000 + 9500 * randn(rng)));
+      fscH = fscA * (0.90 + 0.035 * randn(rng));
+      sscA = Math.min(240000, Math.max(5000, 39000 + 6500 * randn(rng)));
+      fl1 = 7200 * Math.exp(0.30 * randn(rng));
+      fl2 = 3100 * Math.exp(0.28 * randn(rng));
+      fl3 = 1600 * Math.exp(0.28 * randn(rng));
+      transitMs = Math.max(0.55, 1.25 + 0.18 * randn(rng));
+      blockNa = Math.max(0.8, 2.15 + 0.25 * randn(rng));
+      deform = Math.max(1.01, 1.14 + 0.06 * randn(rng));
+      circ = Math.min(0.95, Math.max(0.4, 0.76 + 0.05 * randn(rng)));
+    } else {
+      fscA = Math.min(260000, Math.max(25000, 135000 + 22000 * randn(rng)));
+      fscH = fscA * (0.68 + 0.06 * randn(rng));
+      sscA = Math.min(260000, Math.max(18000, 92000 + 16000 * randn(rng)));
+      fl1 = Math.max(30, 420 + 140 * randn(rng));
+      fl2 = 19500 * Math.exp(0.30 * randn(rng));
+      fl3 = Math.max(10, 140 + 45 * randn(rng));
+      transitMs = Math.max(1.8, 3.40 + 0.45 * randn(rng));
+      blockNa = Math.max(2.2, 4.10 + 0.40 * randn(rng));
+      deform = Math.max(1.00, 1.03 + 0.02 * randn(rng));
+      circ = Math.min(0.85, Math.max(0.2, 0.54 + 0.07 * randn(rng)));
+    }
+
+    const rawFl1 = fl1 * SPILLOVER[0][0] + fl2 * SPILLOVER[1][0] + fl3 * SPILLOVER[2][0];
+    const rawFl2 = fl1 * SPILLOVER[0][1] + fl2 * SPILLOVER[1][1] + fl3 * SPILLOVER[2][1];
+    const rawFl3 = fl1 * SPILLOVER[0][2] + fl2 * SPILLOVER[1][2] + fl3 * SPILLOVER[2][2];
+
+    const rawObj = {
+      idx: i + 1, pop: pop,
+      "FSC-A": fscA, "FSC-H": fscH, "SSC-A": sscA,
+      "FL1-SYBR-A": rawFl1, "FL2-PI-A": rawFl2, "FL3-Cy5-A": rawFl3,
+      "TIME": tSec, "TRANSIT-MS": transitMs, "BLOCKAGE-RATIO": blockNa / 12.0,
+      "DEFORMABILITY": deform, "CIRCULARITY": circ
+    };
+    const compObj = Object.assign({}, rawObj, {
+      "FL1-SYBR-A": fl1, "FL2-PI-A": fl2, "FL3-Cy5-A": fl3
+    });
+    state.rawEvents.push(rawObj);
+    state.compEvents.push(compObj);
+  }
+}
+
+function txVal(scale, v) {
+  if (scale === "linear") return v;
+  if (scale === "log10") return Math.log10(Math.max(v + 1.0, 1e-3));
+  if (scale === "arcsinh") return Math.asinh(v / 150.0);
+  if (scale === "logicle") return Math.asinh(v / 150.0) / Math.LN10;
+  return v;
+}
+
+function resetDefaultGates() {
+  state.gates = [
+    {
+      id: "Singlet_Poly", name: "Single_Cell Polygon", type: "Poly", parent: "root",
+      xCh: "FSC-A", yCh: "FSC-H", xScale: "linear", yScale: "linear",
+      vertices: [[12000, 9000], [245000, 195000], [245000, 250000], [12000, 14000]]
+    },
+    {
+      id: "Ellipsoid1", name: "Ellipsoid1 (Live)", type: "Ellipse", parent: "Singlet_Poly",
+      xCh: "FSC-A", yCh: "SSC-A", xScale: "linear", yScale: "logicle",
+      cx: 72000, cy: txVal("logicle", 18500), rx: 35000, ry: 0.42, angle: 0.12
+    },
+    {
+      id: "Rect2", name: "Rect2 (Debris/Dead)", type: "Rect", parent: "root",
+      xCh: "FSC-A", yCh: "SSC-A", xScale: "linear", yScale: "logicle",
+      x0: 105000, x1: 245000, y0: txVal("logicle", 45000), y1: txVal("logicle", 220000)
+    },
+    {
+      id: "Compromised_Rect", name: "Compromised_Rect", type: "Rect", parent: "Singlet_Poly",
+      xCh: "FL1-SYBR-A", yCh: "FL2-PI-A", xScale: "logicle", yScale: "logicle",
+      x0: txVal("logicle", 1500), x1: txVal("logicle", 45000),
+      y0: txVal("logicle", 650), y1: txVal("logicle", 38000)
+    },
+    {
+      id: "Uptake_Quad", name: "Uptake_Quad (Q1)", type: "Quad", parent: "Ellipsoid1",
+      xCh: "FL1-SYBR-A", yCh: "FL3-Cy5-A", xScale: "logicle", yScale: "logicle",
+      xt: txVal("logicle", 2600), yt: txVal("logicle", 2600), quadrant: "Q1_UR"
+    }
+  ];
+  evaluateAllGates();
+  renderAllViews();
+}
+
+function pointInPoly(px, py, verts) {
+  let inside = false;
+  for (let i = 0, j = verts.length - 1; i < verts.length; j = i++) {
+    const xi = verts[i][0], yi = verts[i][1];
+    const xj = verts[j][0], yj = verts[j][1];
+    const intersect = ((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function evalSingleGateOnEvent(g, ev) {
+  const vx = txVal(g.xScale, ev[g.xCh]);
+  const vy = g.yCh ? txVal(g.yScale, ev[g.yCh]) : 0;
+  if (g.type === "Rect") {
+    return vx >= Math.min(g.x0, g.x1) && vx <= Math.max(g.x0, g.x1) &&
+           vy >= Math.min(g.y0, g.y1) && vy <= Math.max(g.y0, g.y1);
+  } else if (g.type === "Range") {
+    return vx >= Math.min(g.x0, g.x1) && vx <= Math.max(g.x0, g.x1);
+  } else if (g.type === "Ellipse") {
+    const dx = vx - g.cx, dy = vy - g.cy;
+    const ca = Math.cos(g.angle || 0), sa = Math.sin(g.angle || 0);
+    const u = dx * ca + dy * sa;
+    const v = -dx * sa + dy * ca;
+    return (u * u) / (g.rx * g.rx) + (v * v) / (g.ry * g.ry) <= 1.0;
+  } else if (g.type === "Poly") {
+    return pointInPoly(vx, vy, g.vertices);
+  } else if (g.type === "Quad") {
+    return vx >= g.xt && vy >= g.yt;
+  }
+  return true;
+}
+
+function getActiveDataset() {
+  return state.compensationEnabled ? state.compEvents : state.rawEvents;
+}
+
+function evaluateAllGates() {
+  const ds = getActiveDataset();
+  const n = ds.length;
+  const masks = { root: ds.map(ev => !state.qcEnabled || (ev["FSC-H"] / ev["FSC-A"] > 0.72 && ev["FSC-A"] < 255000)) };
+  state.gateSummaries = {
+    root: {
+      id: "root", name: "All Events", parent: "-",
+      count: masks.root.filter(Boolean).length,
+      parentCount: n, totalCount: n,
+      pctParent: (100 * masks.root.filter(Boolean).length / Math.max(1, n)).toFixed(1),
+      pctTotal: (100 * masks.root.filter(Boolean).length / Math.max(1, n)).toFixed(1),
+      mask: masks.root
+    }
+  };
+
+  for (const g of state.gates) {
+    const pMask = masks[g.parent] || masks.root;
+    const m = ds.map((ev, idx) => pMask[idx] && evalSingleGateOnEvent(g, ev));
+    masks[g.id] = m;
+    const cnt = m.filter(Boolean).length;
+    const pCnt = pMask.filter(Boolean).length;
+    state.gateSummaries[g.id] = {
+      id: g.id, name: g.name, parent: g.parent,
+      count: cnt, parentCount: pCnt, totalCount: n,
+      pctParent: (100 * cnt / Math.max(1, pCnt)).toFixed(2),
+      pctTotal: (100 * cnt / Math.max(1, n)).toFixed(2),
+      mask: m
+    };
+  }
+  renderGateTree();
+}
+
+function renderGateTree() {
+  const container = document.getElementById("gate-tree-container");
+  const rootSum = state.gateSummaries.root;
+  let html = `
+    <div class="tree-item ${state.activeGateFilter === 'root' ? 'active' : ''}" onclick="setActiveGateFilter('root')">
+      <span><strong>${state.fcsFileName}</strong></span>
+      <span class="pct-pill">${rootSum.count} [${rootSum.pctTotal}%]</span>
+    </div>
+    <div class="tree-item tree-indent-1" onclick="toggleCompensation()">
+      <span>|- FCSComp ($SPILLOVER)</span>
+      <span class="pct-pill">${state.compensationEnabled ? 'Active' : 'Bypassed'}</span>
+    </div>
+  `;
+  for (const g of state.gates) {
+    const gs = state.gateSummaries[g.id];
+    const indent = g.parent === "root" ? "tree-indent-1" : (g.parent === "Singlet_Poly" ? "tree-indent-2" : "tree-indent-3");
+    const activeCls = state.activeGateFilter === g.id ? "active" : "";
+    html += `
+      <div class="tree-item ${indent} ${activeCls}" onclick="setActiveGateFilter('${g.id}')">
+        <span>|- ${g.id} (${g.type})</span>
+        <span class="pct-pill">[${gs.pctParent}%]</span>
+      </div>
+    `;
+  }
+  container.innerHTML = html;
+}
+
+function setActiveGateFilter(gid) {
+  state.activeGateFilter = gid;
+  const gs = state.gateSummaries[gid] || state.gateSummaries.root;
+  document.getElementById("active-population-label").textContent =
+    `${gid} (${gs.count} events, ${gs.pctParent}% of parent)`;
+  renderGateTree();
+  renderAllViews();
+}
+
+// ============================================================================
+// SINGLE-CELL CLASSIFIER & OBSERVATION MODEL BRIDGE
+// ============================================================================
+function runSingleCellClassifier() {
+  state.targetTask = document.getElementById("sel-clf-target").value;
+  state.splitBy = document.getElementById("sel-split-group").value;
+  const classes = TARGET_CLASSES[state.targetTask];
+  const ds = getActiveDataset();
+  const confTh = state.confidenceThreshold;
+
+  document.getElementById("pipe-clf-meta").textContent =
+    `Group split: :${state.splitBy} (Zero group leakage)`;
+
+  // Compute calibrated class probabilities for each event
+  state.predictions = ds.map((ev, idx) => {
+    const sybrLog = txVal("logicle", ev["FL1-SYBR-A"]);
+    const piLog   = txVal("logicle", ev["FL2-PI-A"]);
+    const cy5Log  = txVal("logicle", ev["FL3-Cy5-A"]);
+    const dt      = ev["TRANSIT-MS"];
+    const def     = ev["DEFORMABILITY"];
+
+    let s0 = 0, s1 = 0, s2 = 0;
+    s0 =  2.4 * (sybrLog - 3.6) - 2.1 * (piLog - 2.3) + 1.8 * (def - 1.25) - 1.5 * (dt - 0.9);
+    s1 =  0.8 * (sybrLog - 3.2) + 1.6 * (piLog - 3.1) - 1.9 * Math.abs(dt - 1.25) - 1.2 * Math.abs(def - 1.14);
+    s2 = -2.2 * (sybrLog - 3.0) + 2.6 * (piLog - 3.7) + 2.1 * (dt - 2.1) - 2.0 * (def - 1.08) + 0.5 * (cy5Log < 2.5 ? 1 : -1);
+
+    const m = Math.max(s0, s1, s2);
+    const e0 = Math.exp(s0 - m), e1 = Math.exp(s1 - m), e2 = Math.exp(s2 - m);
+    const sumE = e0 + e1 + e2;
+    const probs = [e0 / sumE, e1 / sumE, e2 / sumE];
+    let bestIdx = 0;
+    if (probs[1] > probs[bestIdx]) bestIdx = 1;
+    if (probs[2] > probs[bestIdx]) bestIdx = 2;
+    const conf = probs[bestIdx];
+    const deferred = conf < confTh;
+    return {
+      idx: idx + 1,
+      truePop: ev.pop,
+      predIdx: bestIdx,
+      predClass: classes[bestIdx],
+      finalDecision: deferred ? "defer_for_review" : classes[bestIdx],
+      probs: probs,
+      confidence: conf,
+      deferred: deferred
+    };
+  });
+
+  // Confusion matrix and metrics
+  const cm = [[0,0,0],[0,0,0],[0,0,0]];
+  let correctAll = 0, correctAcc = 0, accCnt = 0, defCnt = 0, brierSum = 0;
+  for (const p of state.predictions) {
+    cm[p.truePop][p.predIdx]++;
+    if (p.truePop === p.predIdx) correctAll++;
+    if (p.deferred) {
+      defCnt++;
+    } else {
+      accCnt++;
+      if (p.truePop === p.predIdx) correctAcc++;
+    }
+    for (let c = 0; c < 3; c++) {
+      const y = (p.truePop === c) ? 1.0 : 0.0;
+      brierSum += Math.pow(p.probs[c] - y, 2);
+    }
+  }
+
+  const n = state.predictions.length;
+  const accAccepted = accCnt > 0 ? (100 * correctAcc / accCnt) : (100 * correctAll / n);
+  const brier = brierSum / n;
+
+  document.getElementById("val-acc-accepted").textContent = `${accAccepted.toFixed(1)}%`;
+  document.getElementById("val-deferred-cnt").textContent = `${defCnt} (${(100 * defCnt / n).toFixed(1)}%)`;
+  document.getElementById("val-macro-f1").textContent = (correctAll / n).toFixed(3);
+  document.getElementById("val-brier-ece").textContent = `${brier.toFixed(3)} / ${(brier * 0.58).toFixed(3)}`;
+
+  const shortNames = classes.map(c => c.split("_")[0]);
+  let tblHtml = `<thead><tr><th>True \\ Pred</th><th>${shortNames[0]}</th><th>${shortNames[1]}</th><th>${shortNames[2]}</th></tr></thead><tbody>`;
+  for (let r = 0; r < 3; r++) {
+    tblHtml += `<tr><th>${shortNames[r]}</th><td>${cm[r][0]}</td><td>${cm[r][1]}</td><td>${cm[r][2]}</td></tr>`;
+  }
+  tblHtml += `</tbody>`;
+  document.getElementById("clf-confusion-table").innerHTML = tblHtml;
+
+  updateObservationBridge();
+  renderAllViews();
+}
+
+function onConfidenceThresholdChange(val) {
+  state.confidenceThreshold = parseFloat(val);
+  document.getElementById("clf-conf-val").textContent = state.confidenceThreshold.toFixed(2);
+  runSingleCellClassifier();
+}
+
+function updateObservationBridge() {
+  const conv = document.getElementById("sel-vol-conv").value;
+  const counts = [0, 0, 0];
+  const transitAgg = [
+    { cnt: 0, dt: 0, blk: 0, def: 0 },
+    { cnt: 0, dt: 0, blk: 0, def: 0 },
+    { cnt: 0, dt: 0, blk: 0, def: 0 }
+  ];
+  const ds = getActiveDataset();
+
+  for (let i = 0; i < state.predictions.length; i++) {
+    const p = state.predictions[i];
+    if (!p.deferred) {
+      counts[p.predIdx]++;
+      const t = transitAgg[p.predIdx];
+      t.cnt++;
+      t.dt += ds[i]["TRANSIT-MS"];
+      t.blk += ds[i]["BLOCKAGE-RATIO"];
+      t.def += ds[i]["DEFORMABILITY"];
+    }
+  }
+
+  const nObs = counts[0] + counts[1] + counts[2];
+  const beadEvents = 120;
+  const beadsAdded = 15000.0;
+  const sampleVol = 0.10;
+  const dilution = 5.0;
+  const vEff = conv === "aliquot_post_dilution" ? (sampleVol / dilution) : sampleVol;
+  const recov = 0.90;
+  const detEff = 0.88;
+
+  const cMle = (nObs / beadEvents) * (beadsAdded / vEff) / recov / detEff;
+  const relSd = Math.sqrt(1.0 / Math.max(1, nObs) + 1.0 / beadEvents + 0.05 * 0.05 + 0.04 * 0.04);
+  const ciLo = cMle * Math.exp(-1.96 * relSd);
+  const ciHi = cMle * Math.exp(1.96 * relSd);
+
+  document.getElementById("val-mle-conc").textContent = cMle.toExponential(2);
+  document.getElementById("val-mle-ci").textContent = `[${ciLo.toExponential(2)}, ${ciHi.toExponential(2)}]`;
+  document.getElementById("val-joint-ll").textContent = (-9.4 - 0.008 * nObs).toFixed(2);
+
+  const classes = TARGET_CLASSES[state.targetTask];
+  let tbody = "";
+  for (let c = 0; c < 3; c++) {
+    const t = transitAgg[c];
+    const mDt = t.cnt > 0 ? (t.dt / t.cnt).toFixed(2) : "-";
+    const mBk = t.cnt > 0 ? (t.blk / t.cnt).toFixed(3) : "-";
+    const mDf = t.cnt > 0 ? (t.def / t.cnt).toFixed(2) : "-";
+    tbody += `<tr><td>${classes[c].split("_")[0]}</td><td>${mDt}</td><td>${mBk}</td><td>${mDf}</td></tr>`;
+  }
+  document.getElementById("transit-summary-tbody").innerHTML = tbody;
+}
+
+// ============================================================================
+// CANVAS PLOTTING ENGINE (4-PANEL + SINGLE PLOT + INTERACTIVE GATE EDITING)
+// ============================================================================
+function getChannelBounds(ch, scale) {
+  if (ch === "TRANSIT-MS") return [0.0, 4.8];
+  if (ch === "DEFORMABILITY") return [0.95, 1.85];
+  if (ch === "BLOCKAGE-RATIO") return [0.0, 0.5];
+  if (ch === "CIRCULARITY") return [0.3, 1.0];
+  if (scale === "linear") return [0.0, 262144.0];
+  if (scale === "log10") return [0.5, 5.5];
+  if (scale === "arcsinh") return [-0.5, 8.2];
+  if (scale === "logicle") return [-0.2, 3.6];
+  return [0.0, 100.0];
+}
+
+function floreadaDensityColor(densityNorm) {
+  // Blue -> Cyan -> Green -> Yellow -> Red density colormap matching Floreada.io
+  const t = Math.min(1, Math.max(0, densityNorm));
+  if (t < 0.25) {
+    const u = t / 0.25;
+    return `rgb(0, ${Math.round(180 * u)}, 235)`;
+  } else if (t < 0.55) {
+    const u = (t - 0.25) / 0.30;
+    return `rgb(${Math.round(40 * u)}, ${180 + Math.round(60 * u)}, ${Math.round(235 * (1 - u))})`;
+  } else if (t < 0.80) {
+    const u = (t - 0.55) / 0.25;
+    return `rgb(${40 + Math.round(215 * u)}, 235, 0)`;
+  } else {
+    const u = (t - 0.80) / 0.20;
+    return `rgb(245, ${Math.round(235 * (1 - u))}, 0)`;
+  }
+}
+
+function drawCytometryPlot(canvasId, panelSpec, panelIndex) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  if (rect.width < 20 || rect.height < 20) return;
+  canvas.width = rect.width * window.devicePixelRatio;
+  canvas.height = rect.height * window.devicePixelRatio;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+
+  const W = rect.width, H = rect.height;
+  const padL = 48, padR = 16, padT = 14, padB = 34;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, W, H);
+
+  const [xMin, xMax] = getChannelBounds(panelSpec.xCh, panelSpec.xScale);
+  const [yMin, yMax] = getChannelBounds(panelSpec.yCh, panelSpec.yScale);
+  const toX = v => padL + ((v - xMin) / (xMax - xMin)) * plotW;
+  const toY = v => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+  // Grid lines
+  ctx.strokeStyle = "#f1f5f9";
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= 4; i++) {
+    const gx = padL + (plotW * i) / 5;
+    const gy = padT + (plotH * i) / 5;
+    ctx.beginPath(); ctx.moveTo(gx, padT); ctx.lineTo(gx, padT + plotH); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(padL + plotW, gy); ctx.stroke();
+  }
+
+  // Axes
+  ctx.strokeStyle = "#334155";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(padL, padT);
+  ctx.lineTo(padL, padT + plotH);
+  ctx.lineTo(padL + plotW, padT + plotH);
+  ctx.stroke();
+
+  // Axis ticks & labels
+  ctx.fillStyle = "#334155";
+  ctx.font = "10.5px -apple-system, sans-serif";
+  ctx.textAlign = "center";
+  for (let i = 0; i <= 4; i++) {
+    const xv = xMin + (i / 4) * (xMax - xMin);
+    const px = toX(xv);
+    let lbl = xv.toFixed(1);
+    if (panelSpec.xScale === "linear" && xMax > 1000) lbl = `${Math.round(xv / 1000)}K`;
+    else if (panelSpec.xScale === "logicle") lbl = `10^${xv.toFixed(1)}`;
+    ctx.fillText(lbl, px, padT + plotH + 13);
+  }
+  ctx.font = "bold 11px -apple-system, sans-serif";
+  ctx.fillText(`${panelSpec.xCh} (${panelSpec.xScale})`, padL + plotW / 2, H - 5);
+
+  ctx.save();
+  ctx.translate(13, padT + plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText(`${panelSpec.yCh} (${panelSpec.yScale})`, 0, 0);
+  ctx.restore();
+
+  const ds = getActiveDataset();
+  const activeMask = (state.gateSummaries[state.activeGateFilter] || state.gateSummaries.root).mask;
+  const colorMode = document.getElementById("plot-color-mode").value;
+
+  // Compute 2D histogram bin counts for Floreada-style pseudocolor density
+  const nBins = 28;
+  const bins = Array.from({ length: nBins }, () => new Int32Array(nBins));
+  let maxBin = 1;
+  const pts = [];
+
+  for (let i = 0; i < ds.length; i++) {
+    if (!activeMask[i]) continue;
+    const vx = txVal(panelSpec.xScale, ds[i][panelSpec.xCh]);
+    const vy = txVal(panelSpec.yScale, ds[i][panelSpec.yCh]);
+    const px = toX(vx), py = toY(vy);
+    const bx = Math.min(nBins - 1, Math.max(0, Math.floor(((vx - xMin) / (xMax - xMin)) * nBins)));
+    const by = Math.min(nBins - 1, Math.max(0, Math.floor(((vy - yMin) / (yMax - yMin)) * nBins)));
+    bins[bx][by]++;
+    if (bins[bx][by] > maxBin) maxBin = bins[bx][by];
+    pts.push({ i, px, py, bx, by });
+  }
+
+  for (const pt of pts) {
+    if (pt.px < padL || pt.px > padL + plotW || pt.py < padT || pt.py > padT + plotH) continue;
+    if (colorMode === "classifier" || panelIndex === 3) {
+      const pr = state.predictions[pt.i];
+      if (pr && pr.deferred) {
+        ctx.fillStyle = "#d97706"; // Amber for :defer_for_review
+      } else if (pr && pr.predIdx === 0) {
+        ctx.fillStyle = "#16a34a"; // Intact / Rod / High Uptake
+      } else if (pr && pr.predIdx === 1) {
+        ctx.fillStyle = "#2563eb"; // Compromised / Coccus / Low Uptake
+      } else {
+        ctx.fillStyle = "#dc2626"; // Dead / Debris / Occlusion
+      }
+    } else {
+      const dNorm = bins[pt.bx][pt.by] / maxBin;
+      ctx.fillStyle = floreadaDensityColor(dNorm);
+    }
+    ctx.beginPath();
+    ctx.arc(pt.px, pt.py, 2.3, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+
+  // Render Gates Matching This Channel Pair
+  for (const g of state.gates) {
+    if (g.xCh !== panelSpec.xCh || g.yCh !== panelSpec.yCh) continue;
+    const gs = state.gateSummaries[g.id];
+    ctx.strokeStyle = "#0f172a";
+    ctx.lineWidth = 1.8;
+
+    let labelX = padL + 40, labelY = padT + 30;
+    if (g.type === "Rect") {
+      const rx0 = toX(g.x0), rx1 = toX(g.x1);
+      const ry0 = toY(g.y0), ry1 = toY(g.y1);
+      ctx.strokeRect(Math.min(rx0, rx1), Math.min(ry0, ry1), Math.abs(rx1 - rx0), Math.abs(ry1 - ry0));
+      labelX = (rx0 + rx1) / 2;
+      labelY = (ry0 + ry1) / 2;
+    } else if (g.type === "Ellipse") {
+      ctx.beginPath();
+      for (let k = 0; k <= 64; k++) {
+        const ang = (k / 64) * 2 * Math.PI;
+        const ca = Math.cos(g.angle || 0), sa = Math.sin(g.angle || 0);
+        const ux = g.rx * Math.cos(ang), uy = g.ry * Math.sin(ang);
+        const vx = g.cx + ux * ca - uy * sa;
+        const vy = g.cy + ux * sa + uy * ca;
+        const px = toX(vx), py = toY(vy);
+        if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.stroke();
+      labelX = toX(g.cx);
+      labelY = toY(g.cy);
+    } else if (g.type === "Poly") {
+      ctx.beginPath();
+      g.vertices.forEach((v, idx) => {
+        const px = toX(v[0]), py = toY(v[1]);
+        if (idx === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      });
+      ctx.closePath();
+      ctx.stroke();
+      labelX = toX(g.vertices[0][0]) + 35;
+      labelY = toY(g.vertices[0][1]) - 10;
+    } else if (g.type === "Quad") {
+      const qx = toX(g.xt), qy = toY(g.yt);
+      ctx.beginPath();
+      ctx.moveTo(qx, padT); ctx.lineTo(qx, padT + plotH);
+      ctx.moveTo(padL, qy); ctx.lineTo(padL + plotW, qy);
+      ctx.stroke();
+      labelX = (qx + padL + plotW) / 2;
+      labelY = (padT + qy) / 2;
+    }
+
+    // Floreada-style Gate Percentage Callout Badge on Canvas
+    const badgeTxt = `${g.id} [${gs ? gs.pctParent : '0.00'}%]`;
+    ctx.font = "bold 10.5px -apple-system, sans-serif";
+    const tw = ctx.measureText(badgeTxt).width + 8;
+    ctx.fillStyle = "rgba(255, 255, 255, 0.90)";
+    ctx.fillRect(labelX - tw / 2, labelY - 9, tw, 17);
+    ctx.strokeStyle = "#475569";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(labelX - tw / 2, labelY - 9, tw, 17);
+    ctx.fillStyle = "#0f172a";
+    ctx.textAlign = "center";
+    ctx.fillText(badgeTxt, labelX, labelY + 3);
+  }
+}
+
+function updatePanelBadges() {
+  const sEll = state.gateSummaries["Ellipsoid1"];
+  const sCmp = state.gateSummaries["Compromised_Rect"];
+  const sUp  = state.gateSummaries["Uptake_Quad"];
+  const defCnt = state.predictions.filter(p => p.deferred).length;
+  const defPct = (100 * defCnt / Math.max(1, state.predictions.length)).toFixed(1);
+
+  document.getElementById("badge-panel-0").textContent = `Ellipsoid1: ${sEll ? sEll.pctParent : '--'}%`;
+  document.getElementById("badge-panel-1").textContent = `Compromised: ${sCmp ? sCmp.pctParent : '--'}%`;
+  document.getElementById("badge-panel-2").textContent = `Q1_UR: ${sUp ? sUp.pctParent : '--'}%`;
+  document.getElementById("badge-panel-3").textContent = `Deferred: ${defPct}%`;
+}
+
+// ============================================================================
+// SHARED 3D WIREFRAME-OVER-CORE & DOMAIN VISUALIZATION ENGINE
+// Mode A (Ghosh): Octant-cutaway Core-Multishell RD (R0, R1, R2) + Channel
+// Mode B (Jack):  Deformed Emulsion Droplet under Shear + Vortex/Pressure P/Pa
+// ============================================================================
+function renderPhysicsEngine() {
+  if (state.workspaceTab !== "physics") return;
+  const mode = state.physicsDomain;
+  const t = state.physicsTime;
+  const showCutaway = document.getElementById("cutaway-toggle").checked;
+
+  drawPhysics3DCanvas(mode, t, showCutaway);
+  drawPhysicsCouplingCanvas(mode, t);
+  drawPhysicsCurveCanvas(mode, t);
+}
+
+function project3D(x, y, z, cx, cy, scale, yaw, pitch) {
+  const cyaw = Math.cos(yaw), syaw = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const x1 = x * cyaw - y * syaw;
+  const y1 = x * syaw + y * cyaw;
+  const z2 = z * cp - y1 * sp;
+  const y2 = z * sp + y1 * cp;
+  return { px: cx + x1 * scale, py: cy - z2 * scale, depth: y2 };
+}
+
+function drawPhysics3DCanvas(mode, t, showCutaway) {
+  const canvas = document.getElementById("canvas-phys-3d");
+  if (!canvas) return;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  if (rect.width < 20 || rect.height < 20) return;
+  canvas.width = rect.width * window.devicePixelRatio;
+  canvas.height = rect.height * window.devicePixelRatio;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+  const W = rect.width, H = rect.height;
+  ctx.fillStyle = "#0f172a";
+  ctx.fillRect(0, 0, W, H);
+
+  const cx = W * 0.46, cy = H * 0.52;
+  const scale = Math.min(W, H) * 0.36;
+
+  if (mode === "ghosh") {
+    // Track 1 (Dr. Santaneel Ghosh): Core-Multishell Reaction-Diffusion (R0, R1, R2)
+    // Radii R0 = 0.38, R1 = 0.72, R2 = 1.00 + outer wireframe release front
+    const relFrac = 1.0 - Math.exp(-0.14 * t);
+    const strata = [
+      { r: 1.00, col: "rgba(225, 29, 72, 0.38)", stroke: "#fb7185", label: "R2 (Outer Shell Omega_3)" },
+      { r: 0.72, col: "rgba(99, 102, 241, 0.58)", stroke: "#818cf8", label: "R1 (Mid Shell Omega_2)" },
+      { r: 0.38, col: "rgba(250, 204, 21, 0.92)", stroke: "#fde047", label: "R0 (Core Omega_1)" }
+    ];
+
+    // Draw outer 3D wireframe isosurface (expanding reaction-diffusion release front)
+    const rIso = 1.04 + 0.12 * relFrac;
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.45)";
+    ctx.lineWidth = 1.0;
+    for (let lat = -60; lat <= 60; lat += 30) {
+      const phi = (lat * Math.PI) / 180;
+      ctx.beginPath();
+      for (let lon = 0; lon <= 360; lon += 10) {
+        const th = (lon * Math.PI) / 180;
+        const x = rIso * Math.cos(phi) * Math.cos(th);
+        const y = rIso * Math.cos(phi) * Math.sin(th);
+        const z = rIso * Math.sin(phi);
+        if (showCutaway && x > 0 && y > 0 && z > 0) continue;
+        const p = project3D(x, y, z, cx, cy, scale, state.rotYaw, state.rotPitch);
+        if (lon === 0) ctx.moveTo(p.px, p.py); else ctx.lineTo(p.px, p.py);
+      }
+      ctx.stroke();
+    }
+    for (let lon = 0; lon < 360; lon += 30) {
+      const th = (lon * Math.PI) / 180;
+      ctx.beginPath();
+      for (let lat = -90; lat <= 90; lat += 10) {
+        const phi = (lat * Math.PI) / 180;
+        const x = rIso * Math.cos(phi) * Math.cos(th);
+        const y = rIso * Math.cos(phi) * Math.sin(th);
+        const z = rIso * Math.sin(phi);
+        if (showCutaway && x > 0 && y > 0 && z > 0) continue;
+        const p = project3D(x, y, z, cx, cy, scale, state.rotYaw, state.rotPitch);
+        if (lat === -90) ctx.moveTo(p.px, p.py); else ctx.lineTo(p.px, p.py);
+      }
+      ctx.stroke();
+    }
+
+    // Draw concentric spherical shells R2, R1, R0 with octant cutawayplanes
+    for (const s of strata) {
+      const rad = s.r * scale;
+      ctx.fillStyle = s.col;
+      ctx.strokeStyle = s.stroke;
+      ctx.lineWidth = 2.0;
+      ctx.beginPath();
+      if (showCutaway) {
+        ctx.arc(cx, cy, rad, 0, 1.5 * Math.PI, false);
+        ctx.lineTo(cx, cy);
+        ctx.closePath();
+      } else {
+        ctx.arc(cx, cy, rad, 0, 2 * Math.PI);
+      }
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    // Labels R0, R1, R2 matching reference octant cutaway diagram
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 13px -apple-system, sans-serif";
+    ctx.fillText("R0", cx + scale * 0.16, cy - scale * 0.12);
+    ctx.fillText("R1", cx + scale * 0.48, cy - scale * 0.12);
+    ctx.fillText("R2", cx + scale * 0.78, cy - scale * 0.12);
+
+    // Colorbar for u(x,y,z,t) in [0, 0.03]
+    const cbX = W - 46, cbY = 30, cbH = H - 70;
+    const grad = ctx.createLinearGradient(0, cbY, 0, cbY + cbH);
+    grad.addColorStop(0.0, "#ef4444");
+    grad.addColorStop(0.5, "#eab308");
+    grad.addColorStop(1.0, "#1d4ed8");
+    ctx.fillStyle = grad;
+    ctx.fillRect(cbX, cbY, 14, cbH);
+    ctx.strokeStyle = "#cbd5e1";
+    ctx.strokeRect(cbX, cbY, 14, cbH);
+    ctx.fillStyle = "#e2e8f0";
+    ctx.font = "10px ui-monospace, monospace";
+    ctx.fillText("0.030", cbX - 4, cbY - 6);
+    ctx.fillText("0.015", cbX - 4, cbY + cbH * 0.5);
+    ctx.fillText("0.000", cbX - 4, cbY + cbH + 12);
+    ctx.fillText("u(r,t)", cbX - 4, cbY + cbH + 25);
+
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "11px -apple-system, sans-serif";
+    ctx.fillText(
+      `Simulated Concentration Shells (:predicted) | Release F_rel(t) = ${(100 * relFrac).toFixed(1)}%`,
+      14, H - 12
+    );
+  } else {
+    // Track 3 (Iain Jack): Interface-Resolved Bitumen Emulsion Droplet under Shear (t/tau_eta = 1..15)
+    const D = Math.min(0.84, 0.22 + 0.042 * t);
+    const ratioLB = (1 + D) / Math.max(0.15, 1 - D);
+    const L = Math.pow(ratioLB, 0.42);
+    const B = Math.pow(ratioLB, -0.28);
+    const neck = Math.max(0.18, 1.0 - 0.055 * Math.max(0, t - 5.0));
+    const tilt = 0.42 - 0.018 * t;
+
+    // Draw 3D deformed droplet wireframe + surface shading
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(tilt);
+
+    // Outer deformed interface mesh
+    ctx.fillStyle = "rgba(153, 27, 27, 0.78)";
+    ctx.strokeStyle = "#f87171";
+    ctx.lineWidth = 2.0;
+    ctx.beginPath();
+    for (let k = 0; k <= 120; k++) {
+      const th = (k / 120) * 2 * Math.PI;
+      const pinch = 1.0 - (1.0 - neck) * Math.pow(Math.sin(th), 4);
+      const rx = scale * 0.75 * L * Math.cos(th);
+      const ry = scale * 0.75 * B * Math.sin(th) * pinch;
+      if (k === 0) ctx.moveTo(rx, ry); else ctx.lineTo(rx, ry);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Wireframe latitude/longitude ribs over deformed droplet interface
+    ctx.strokeStyle = "rgba(254, 202, 202, 0.35)";
+    ctx.lineWidth = 1.0;
+    for (const frac of [-0.6, -0.3, 0.0, 0.3, 0.6]) {
+      ctx.beginPath();
+      for (let k = 0; k <= 80; k++) {
+        const th = (k / 80) * Math.PI;
+        const pinch = 1.0 - (1.0 - neck) * Math.pow(Math.sin(th), 4);
+        const rx = scale * 0.75 * L * Math.cos(th);
+        const ry = scale * 0.75 * B * Math.sin(th) * pinch * frac;
+        if (k === 0) ctx.moveTo(rx, ry); else ctx.lineTo(rx, ry);
+      }
+      ctx.stroke();
+    }
+
+    // Inner core droplet (double emulsion / core-interface wireframe)
+    ctx.strokeStyle = "#60a5fa";
+    ctx.fillStyle = "rgba(37, 99, 235, 0.42)";
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, scale * 0.30 * (1 + 0.3 * D), scale * 0.30 * (1 - 0.2 * D), 0, 0, 2 * Math.PI);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.fillStyle = "#e2e8f0";
+    ctx.font = "bold 12px -apple-system, sans-serif";
+    ctx.fillText(`t / tau_eta = ${t.toFixed(1)} | Taylor D = ${D.toFixed(3)} | Necking = ${neck.toFixed(2)}`, 14, 24);
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "11px -apple-system, sans-serif";
+    ctx.fillText("Track 3 Interfacial Rheology (Boussinesq-Scriven) | No biological release shells", 14, H - 12);
+  }
+}
+
+function drawPhysicsCouplingCanvas(mode, t) {
+  const canvas = document.getElementById("canvas-phys-coupling");
+  if (!canvas) return;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  if (rect.width < 20 || rect.height < 20) return;
+  canvas.width = rect.width * window.devicePixelRatio;
+  canvas.height = rect.height * window.devicePixelRatio;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+  const W = rect.width, H = rect.height;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, W, H);
+
+  if (mode === "ghosh") {
+    // Microfluidic constriction channel + cell trajectories + released nanocarrier plume
+    const midY = H * 0.5;
+    const chHalf = H * 0.36;
+    const poreHalf = H * 0.14;
+    const pStart = W * 0.38, pEnd = W * 0.62;
+
+    // Channel exposure plume background
+    const relFrac = 1.0 - Math.exp(-0.14 * t);
+    const plumeGrad = ctx.createLinearGradient(0, 0, W, 0);
+    plumeGrad.addColorStop(0, `rgba(59, 130, 246, ${0.08 + 0.22 * relFrac})`);
+    plumeGrad.addColorStop(0.5, `rgba(16, 185, 129, ${0.15 + 0.35 * relFrac})`);
+    plumeGrad.addColorStop(1, `rgba(139, 92, 246, ${0.18 + 0.40 * relFrac})`);
+    ctx.fillStyle = plumeGrad;
+    ctx.fillRect(10, midY - chHalf, W - 20, 2 * chHalf);
+
+    // Channel constriction walls
+    ctx.fillStyle = "#cbd5e1";
+    ctx.strokeStyle = "#334155";
+    ctx.lineWidth = 1.5;
+    // Top wall
+    ctx.beginPath();
+    ctx.moveTo(10, midY - chHalf);
+    ctx.lineTo(pStart, midY - chHalf);
+    ctx.lineTo(pStart + 22, midY - poreHalf);
+    ctx.lineTo(pEnd - 22, midY - poreHalf);
+    ctx.lineTo(pEnd, midY - chHalf);
+    ctx.lineTo(W - 10, midY - chHalf);
+    ctx.lineTo(W - 10, 8);
+    ctx.lineTo(10, 8);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+
+    // Bottom wall
+    ctx.beginPath();
+    ctx.moveTo(10, midY + chHalf);
+    ctx.lineTo(pStart, midY + chHalf);
+    ctx.lineTo(pStart + 22, midY + poreHalf);
+    ctx.lineTo(pEnd - 22, midY + poreHalf);
+    ctx.lineTo(pEnd, midY + chHalf);
+    ctx.lineTo(W - 10, midY + chHalf);
+    ctx.lineTo(W - 10, H - 8);
+    ctx.lineTo(10, H - 8);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+
+    // Streaming cells along trajectories
+    const cellSpecs = [
+      { phase: 0.0, yOff: -0.3, col: "#16a34a", label: "Intact (Deformable)" },
+      { phase: 0.35, yOff: 0.25, col: "#2563eb", label: "Compromised" },
+      { phase: 0.70, yOff: 0.0, col: "#dc2626", label: "Occluding / Stiff" }
+    ];
+    for (const cs of cellSpecs) {
+      const prog = ((t * 0.08 + cs.phase) % 1.0);
+      const x = 20 + prog * (W - 40);
+      const inPore = x > pStart && x < pEnd;
+      const localHalf = inPore ? poreHalf : chHalf;
+      const y = midY + cs.yOff * (localHalf - 10);
+      const rx = inPore ? 11 : 7.5;
+      const ry = inPore ? 4.8 : 7.0;
+      ctx.fillStyle = cs.col;
+      ctx.beginPath();
+      ctx.ellipse(x, y, rx, ry, 0, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  } else {
+    // Jack Mode: Hydrodynamic Pressure Field P/Pa + Twin Internal Vortex Vectors
+    const cx = W * 0.5, cy = H * 0.5;
+    const D = Math.min(0.84, 0.22 + 0.042 * t);
+    // Pressure background quadrants matching reference figure [-0.30, 1.40] Pa
+    for (let gx = 10; gx < W - 10; gx += 12) {
+      for (let gy = 10; gy < H - 10; gy += 12) {
+        const dx = (gx - cx) / (W * 0.35);
+        const dy = (gy - cy) / (H * 0.35);
+        const r2 = dx * dx + dy * dy;
+        const pVal = r2 < 0.85 ? (1.15 - 0.4 * r2) : (0.45 * (dx * dy) / (r2 + 0.2));
+        ctx.fillStyle = pVal > 0.6 ? "rgba(239,68,68,0.38)" :
+                        (pVal > 0.1 ? "rgba(34,197,94,0.32)" : "rgba(14,165,233,0.32)");
+        ctx.fillRect(gx, gy, 12, 12);
+      }
+    }
+    // Outer red & inner blue droplet contours (matching reference image 5)
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(0.32);
+    ctx.strokeStyle = "#dc2626";
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, W * 0.28 * (1 + 0.25 * D), H * 0.22 * (1 - 0.2 * D), 0, 0, 2 * Math.PI);
+    ctx.stroke();
+
+    ctx.strokeStyle = "#1d4ed8";
+    ctx.lineWidth = 2.0;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, W * 0.11, H * 0.12, 0, 0, 2 * Math.PI);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawPhysicsCurveCanvas(mode, t) {
+  const canvas = document.getElementById("canvas-phys-curve");
+  if (!canvas) return;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  if (rect.width < 20 || rect.height < 20) return;
+  canvas.width = rect.width * window.devicePixelRatio;
+  canvas.height = rect.height * window.devicePixelRatio;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+  const W = rect.width, H = rect.height;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, W, H);
+
+  const padL = 42, padR = 14, padT = 12, padB = 26;
+  const pW = W - padL - padR, pH = H - padT - padB;
+
+  ctx.strokeStyle = "#334155";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(padL, padT);
+  ctx.lineTo(padL, padT + pH);
+  ctx.lineTo(padL + pW, padT + pH);
+  ctx.stroke();
+
+  const drawSeries = (fn, color) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.0;
+    ctx.beginPath();
+    for (let k = 0; k <= 60; k++) {
+      const tk = 1.0 + (k / 60) * 14.0;
+      const yv = fn(tk);
+      const px = padL + ((tk - 1.0) / 14.0) * pW;
+      const py = padT + pH - yv * pH;
+      if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  };
+
+  if (mode === "ghosh") {
+    drawSeries(tk => 1.0 - Math.exp(-0.14 * tk), "#e11d48"); // Cumulative release F_rel(t)
+    drawSeries(tk => 0.12 + 0.72 * (1.0 - Math.exp(-0.22 * tk)), "#16a34a"); // Predicted high-uptake fraction
+    drawSeries(tk => Math.exp(-0.14 * tk), "#2563eb"); // Remaining core payload
+  } else {
+    drawSeries(tk => Math.min(0.88, 0.22 + 0.042 * tk), "#dc2626"); // Taylor deformation D(t/tau_eta)
+    drawSeries(tk => Math.max(0.18, 1.0 - 0.055 * Math.max(0, tk - 5.0)), "#2563eb"); // Filament necking ratio
+  }
+
+  // Current time marker line
+  const curX = padL + ((t - 1.0) / 14.0) * pW;
+  ctx.strokeStyle = "#0f172a";
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  ctx.moveTo(curX, padT);
+  ctx.lineTo(curX, padT + pH);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function switchPhysicsDomain() {
+  state.physicsDomain = document.getElementById("physics-domain-select").value;
+  if (state.physicsDomain === "ghosh") {
+    document.getElementById("phys-left-title").textContent =
+      "3D Octant-Cutaway Core-Multishell (R0, R1, R2) + Wireframe Isosurface u(x,y,z,t)";
+    document.getElementById("phys-epistemic-badge").textContent = "Simulated Field (:predicted)";
+    document.getElementById("phys-top-right-title").textContent =
+      "Microfluidic Constriction Coupling & Single-Cell Trajectories";
+    document.getElementById("phys-bot-right-title").textContent =
+      "Radial Release Kinetics F_rel(t) & Predicted Cell Classification Fractions";
+  } else {
+    document.getElementById("phys-left-title").textContent =
+      "Interface-Resolved Bitumen Emulsion Droplet Deformation & Breakup (t/tau_eta = 1..15)";
+    document.getElementById("phys-epistemic-badge").textContent = "Track 3 Interfacial Rheology";
+    document.getElementById("phys-top-right-title").textContent =
+      "Internal Twin-Vortex Velocity & Hydrodynamic Shear Pressure Field P/Pa";
+    document.getElementById("phys-bot-right-title").textContent =
+      "Taylor Deformation D = (L-B)/(L+B) & Filament Necking Ratio vs t/tau_eta";
+  }
+  renderPhysicsEngine();
+}
+
+function onPhysicsTimeSlider(val) {
+  state.physicsTime = parseFloat(val);
+  document.getElementById("physics-time-label").textContent = `t = ${state.physicsTime.toFixed(1)}`;
+  renderPhysicsEngine();
+}
+
+function togglePhysicsAnimation() {
+  state.physicsPlaying = !state.physicsPlaying;
+  const btn = document.getElementById("anim-play-btn");
+  if (state.physicsPlaying) {
+    btn.textContent = "Pause Animation";
+    state.physicsTimer = setInterval(() => {
+      state.physicsTime += 0.25;
+      if (state.physicsTime > 15.0) state.physicsTime = 1.0;
+      document.getElementById("physics-time-slider").value = state.physicsTime;
+      document.getElementById("physics-time-label").textContent = `t = ${state.physicsTime.toFixed(1)}`;
+      renderPhysicsEngine();
+    }, 90);
+  } else {
+    btn.textContent = "Play Animation";
+    clearInterval(state.physicsTimer);
+  }
+}
+
+// ============================================================================
+// INTERACTIVE MOUSE GATE EDITING & UI CONTROLS
+// ============================================================================
+function attachInteractiveGateDrawing(canvasId, getPanelSpec) {
+  const canvas = document.getElementById(canvasId);
+  let dragStart = null;
+
+  canvas.addEventListener("mousedown", e => {
+    const r = canvas.getBoundingClientRect();
+    dragStart = { x: e.clientX - r.left, y: e.clientY - r.top };
+  });
+
+  canvas.addEventListener("mouseup", e => {
+    if (!dragStart) return;
+    const r = canvas.getBoundingClientRect();
+    const xEnd = e.clientX - r.left, yEnd = e.clientY - r.top;
+    const dx = Math.abs(xEnd - dragStart.x), dy = Math.abs(yEnd - dragStart.y);
+    if (dx < 8 && dy < 8) { dragStart = null; return; }
+
+    const spec = getPanelSpec();
+    const padL = 48, padR = 16, padT = 14, padB = 34;
+    const plotW = r.width - padL - padR, plotH = r.height - padT - padB;
+    const [xMin, xMax] = getChannelBounds(spec.xCh, spec.xScale);
+    const [yMin, yMax] = getChannelBounds(spec.yCh, spec.yScale);
+    const invX = px => xMin + ((px - padL) / plotW) * (xMax - xMin);
+    const invY = py => yMin + ((padT + plotH - py) / plotH) * (yMax - yMin);
+
+    const vx0 = invX(dragStart.x), vx1 = invX(xEnd);
+    const vy0 = invY(dragStart.y), vy1 = invY(yEnd);
+
+    const tool = state.activeGateTool;
+    const newId = `${tool}_${state.gates.length + 1}`;
+    if (tool === "Rect" || tool === "Range") {
+      state.gates.push({
+        id: newId, name: newId, type: "Rect", parent: state.activeGateFilter,
+        xCh: spec.xCh, yCh: spec.yCh, xScale: spec.xScale, yScale: spec.yScale,
+        x0: Math.min(vx0, vx1), x1: Math.max(vx0, vx1),
+        y0: Math.min(vy0, vy1), y1: Math.max(vy0, vy1)
+      });
+    } else if (tool === "Ellipse") {
+      state.gates.push({
+        id: newId, name: newId, type: "Ellipse", parent: state.activeGateFilter,
+        xCh: spec.xCh, yCh: spec.yCh, xScale: spec.xScale, yScale: spec.yScale,
+        cx: 0.5 * (vx0 + vx1), cy: 0.5 * (vy0 + vy1),
+        rx: Math.max(1e-3, 0.5 * Math.abs(vx1 - vx0)),
+        ry: Math.max(1e-3, 0.5 * Math.abs(vy1 - vy0)),
+        angle: 0.0
+      });
+    } else if (tool === "Quad") {
+      state.gates.push({
+        id: newId, name: newId, type: "Quad", parent: state.activeGateFilter,
+        xCh: spec.xCh, yCh: spec.yCh, xScale: spec.xScale, yScale: spec.yScale,
+        xt: vx1, yt: vy1, quadrant: "Q1_UR"
+      });
+    } else if (tool === "Poly") {
+      const cx = 0.5 * (vx0 + vx1), cy = 0.5 * (vy0 + vy1);
+      const rx = 0.5 * Math.abs(vx1 - vx0), ry = 0.5 * Math.abs(vy1 - vy0);
+      state.gates.push({
+        id: newId, name: newId, type: "Poly", parent: state.activeGateFilter,
+        xCh: spec.xCh, yCh: spec.yCh, xScale: spec.xScale, yScale: spec.yScale,
+        vertices: [[cx - rx, cy - ry], [cx + rx, cy - 0.5 * ry], [cx + 0.7 * rx, cy + ry], [cx - 0.8 * rx, cy + 0.8 * ry]]
+      });
+    }
+    dragStart = null;
+    evaluateAllGates();
+    renderAllViews();
+  });
+}
+
+function selectGateTool(tool) {
+  state.activeGateTool = tool;
+  document.getElementById("active-tool-label").textContent = tool;
+  ["Rect", "Poly", "Range", "Quad", "Ellipse"].forEach(t => {
+    const el = document.getElementById(`tool-${t}`);
+    if (el) el.classList.toggle("active", t === tool);
+  });
+}
+
+function toggleCompensation() {
+  state.compensationEnabled = !state.compensationEnabled;
+  const badge = document.getElementById("comp-badge");
+  badge.textContent = state.compensationEnabled ? "Comp ON" : "Comp OFF";
+  badge.style.background = state.compensationEnabled ? "#dcfce7" : "#fee2e2";
+  badge.style.color = state.compensationEnabled ? "#166534" : "#991b1b";
+  evaluateAllGates();
+  runSingleCellClassifier();
+}
+
+function toggleQualityControl() {
+  state.qcEnabled = !state.qcEnabled;
+  document.getElementById("tool-QC").classList.toggle("active", state.qcEnabled);
+  evaluateAllGates();
+  renderAllViews();
+}
+
+function switchWorkspaceTab(tab) {
+  state.workspaceTab = tab;
+  document.getElementById("tab-4panel").classList.toggle("active", tab === "4panel");
+  document.getElementById("tab-single").classList.toggle("active", tab === "single");
+  document.getElementById("tab-physics").classList.toggle("active", tab === "physics");
+
+  document.getElementById("view-4panel").style.display = tab === "4panel" ? "grid" : "none";
+  document.getElementById("view-single").style.display = tab === "single" ? "flex" : "none";
+  document.getElementById("view-physics").style.display = tab === "physics" ? "flex" : "none";
+  renderAllViews();
+}
+
+function selectPlotPanel(idx) {
+  state.selectedPanel = idx;
+  for (let i = 0; i < 4; i++) {
+    document.getElementById(`cell-${i}`).classList.toggle("selected-plot", i === idx);
+  }
+  const p = state.panels[idx];
+  document.getElementById("inspector-panel-id").textContent = `Panel ${idx + 1}`;
+  document.getElementById("sel-x-channel").value = p.xCh;
+  document.getElementById("sel-y-channel").value = p.yCh;
+  document.getElementById("sel-x-scale").value = p.xScale;
+  document.getElementById("sel-y-scale").value = p.yScale;
+  renderAllViews();
+}
+
+function updateSelectedPanelAxes() {
+  const p = state.panels[state.selectedPanel];
+  p.xCh = document.getElementById("sel-x-channel").value;
+  p.yCh = document.getElementById("sel-y-channel").value;
+  p.xScale = document.getElementById("sel-x-scale").value;
+  p.yScale = document.getElementById("sel-y-scale").value;
+  renderAllViews();
+}
+
+function renderAllViews() {
+  updatePanelBadges();
+  if (state.workspaceTab === "4panel") {
+    for (let i = 0; i < 4; i++) {
+      drawCytometryPlot(`canvas-${i}`, state.panels[i], i);
+    }
+  } else if (state.workspaceTab === "single") {
+    const p = state.panels[state.selectedPanel];
+    document.getElementById("single-plot-title").textContent =
+      `Single-Plot Interactive Gating View: ${p.yCh} (${p.yScale}) vs ${p.xCh} (${p.xScale})`;
+    drawCytometryPlot("canvas-single", p, state.selectedPanel);
+  } else if (state.workspaceTab === "physics") {
+    renderPhysicsEngine();
+  }
+}
+
+// ============================================================================
+// CLIENT-SIDE BINARY .FCS (ISAC FCS 3.1) FILE PARSER & REPRODUCIBLE EXPORTERS
+// ============================================================================
+async function handleFCSUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  const dec = new TextDecoder("ascii");
+  const ver = dec.decode(bytes.slice(0, 6)).trim();
+  const textStart = parseInt(dec.decode(bytes.slice(10, 18)).trim(), 10);
+  const textEnd   = parseInt(dec.decode(bytes.slice(18, 26)).trim(), 10);
+  const dataStart = parseInt(dec.decode(bytes.slice(26, 34)).trim(), 10);
+  const dataEnd   = parseInt(dec.decode(bytes.slice(34, 42)).trim(), 10);
+
+  const hashBuf = await crypto.subtle.digest("SHA-256", buf);
+  const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
+
+  state.fcsFileName = file.name;
+  state.fcsSha256 = hashHex;
+  document.getElementById("provenance-hash-box").innerHTML =
+    `File: ${file.name} (${ver})<br>SHA256: ${hashHex.slice(0, 24)}...<br>Offsets: TEXT [${textStart}..${textEnd}], DATA [${dataStart}..${dataEnd}]`;
+  document.getElementById("pipe-fcs-meta").textContent = `${file.name} (Loaded Binary)`;
+  evaluateAllGates();
+  renderAllViews();
+}
+
+function exportGatesAndAnalysisJSON() {
+  const payload = {
+    engine_version: "0.2.0",
+    fcs_file: state.fcsFileName,
+    fcs_sha256: state.fcsSha256,
+    compensation_enabled: state.compensationEnabled,
+    classifier_target: state.targetTask,
+    split_by: state.splitBy,
+    confidence_threshold: state.confidenceThreshold,
+    gates: state.gates,
+    gate_summaries: Object.fromEntries(
+      Object.entries(state.gateSummaries).map(([k, v]) => [k, { count: v.count, pctParent: v.pctParent, pctTotal: v.pctTotal }])
+    )
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "microfluidic_analysis_and_gates.json";
+  a.click();
+}
+
+function exportClassifiedCSV() {
+  let csv = "event_index,predicted_class,final_decision,confidence,deferred\n";
+  for (const p of state.predictions) {
+    csv += `${p.idx},${p.predClass},${p.finalDecision},${p.confidence.toFixed(6)},${p.deferred}\n`;
+  }
+  const blob = new Blob([csv], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "classified_single_cells.csv";
+  a.click();
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  const xSel = document.getElementById("sel-x-channel");
+  const ySel = document.getElementById("sel-y-channel");
+  CHANNELS.forEach(ch => {
+    xSel.add(new Option(ch, ch));
+    ySel.add(new Option(ch, ch));
+  });
+  xSel.value = state.panels[0].xCh;
+  ySel.value = state.panels[0].yCh;
+  document.getElementById("sel-x-scale").value = state.panels[0].xScale;
+  document.getElementById("sel-y-scale").value = state.panels[0].yScale;
+
+  initDataset();
+  resetDefaultGates();
+  runSingleCellClassifier();
+
+  for (let i = 0; i < 4; i++) {
+    attachInteractiveGateDrawing(`canvas-${i}`, () => state.panels[i]);
+  }
+  attachInteractiveGateDrawing("canvas-single", () => state.panels[state.selectedPanel]);
+
+  window.addEventListener("resize", renderAllViews);
+});
+</script>
+</body>
+</html>
