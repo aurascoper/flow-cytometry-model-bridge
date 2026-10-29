@@ -12,8 +12,8 @@
     "integrated_into_existing_openfoam_phreeqc_solvers": false,
     "julia_version": "1.13.1",
     "julia_test_command": "julia --startup-file=no code/test_FlowCytometryObservationModel.jl",
-    "julia_test_passed": 96,
-    "julia_test_total": 96,
+    "julia_test_passed": 118,
+    "julia_test_total": 118,
     "model_adapter_version": "0.2.0",
     "priorities_implemented": [
       "Priority 1: Observation-model specification and volume-convention MLE consistency",
@@ -28,13 +28,13 @@
   "files": [
     {
       "path": "README_DELIVERY.md",
-      "bytes": 3834,
-      "sha256": "12657f984d74e45f6ae41ccdf1dfd556dc319f872b5abe8d1cf277219f082c87"
+      "bytes": 3838,
+      "sha256": "a8ed975ebc1a52e20956c221688c7cb84d81f430acd8b0adbd3d221f5e876f09"
     },
     {
       "path": "code/FlowCytometryObservationModel.jl",
-      "bytes": 49895,
-      "sha256": "3a8443136eaa7151ed26c2acb81568d3e1f619045ceb83d860257e72dc83d319"
+      "bytes": 54815,
+      "sha256": "893aff3a7646276c18456aefd395e0b8aa85a446add9d9cb84e8d512d5091f46"
     },
     {
       "path": "code/flow_cytometry_samples_template.csv",
@@ -43,8 +43,8 @@
     },
     {
       "path": "code/test_FlowCytometryObservationModel.jl",
-      "bytes": 19186,
-      "sha256": "960037fd27d3e6bfa767175d999e3d7ed913bb5a27679e1c4aa71bdd3e5a1f61"
+      "bytes": 24160,
+      "sha256": "f16f8381c4c6bbe6f47f96ca12656cd4808e3b7350834fb834e0a4777ca4f2a0"
     },
     {
       "path": "docs/build_flow_cytometry_addendum.py",
@@ -63,8 +63,8 @@
     },
     {
       "path": "docs/flow_cytometry_model_bridge_spec.md",
-      "bytes": 15974,
-      "sha256": "b411f5f6901314c44e90ff664c3b9d5682fa854b52b6fdd4376b0754d7155d70"
+      "bytes": 16857,
+      "sha256": "24dda551c5cb37f6991a0daaace4ee6e4c1ba8bcbbaf02fa21bfcacb3f8096cb"
     },
     {
       "path": "presentations/Clay_Microbes_Metal_22slides_Flow_Cytometry_Addendum.pdf",

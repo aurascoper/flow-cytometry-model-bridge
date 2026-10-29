@@ -1,6 +1,6 @@
 # Flow cytometry as the observation layer for coupled flow-geochemistry-biofilm models
 
-**Status:** standalone observation-model interface specification and calibrated verification suite (`MODEL_ADAPTER_VERSION = "0.2.0"`), verified with 96/96 local Julia unit tests (`julia --startup-file=no code/test_FlowCytometryObservationModel.jl`). Not yet coupled into external OpenFOAM or PHREEQC production solver repositories.
+**Status:** standalone observation-model interface specification and calibrated verification suite (`MODEL_ADAPTER_VERSION = "0.2.0"`), verified with 118/118 local Julia unit tests (`julia --startup-file=no code/test_FlowCytometryObservationModel.jl`). Not yet coupled into external OpenFOAM or PHREEQC production solver repositories.
 
 ## 1. Scientific rationale and literature anchors
 
@@ -80,8 +80,8 @@ When biological or technical replicates exhibit variance exceeding Poisson-Multi
 
 ## 4. Priority 2: Synthetic-data simulation and parameter recovery
 
-- `simulate_fcm_sample` generates synthetic bead counts and 3-gate cell counts under the exact forward observation model (`_rand_poisson` using exact additive Knuth decomposition for $\lambda \le 10{,}000$ and `_rand_multinomial3`).
-- `recover_latent_state_mle` recovers the maximum-likelihood `CellStatePrediction` across replicate samples from a single compartment using exact closed-form Poisson exposure pooling for $\hat{C}_{\text{MLE}}$ and simplex-projected Richardson-Lucy / EM iteration for $\hat{f}_{\text{MLE}}$ on the 3-simplex $\Delta^2$.
+- `simulate_fcm_sample` generates synthetic bead counts and 3-gate cell counts under the exact forward observation model (`_rand_poisson` using exact additive Knuth decomposition for $\lambda \le 64$ and Atkinson's exact logistic rejection method for $\lambda > 64$, plus `_rand_multinomial3`).
+- `recover_latent_state_mle` recovers the maximum-likelihood `CellStatePrediction` across replicate samples from a single compartment using exact closed-form Poisson exposure pooling for $\hat{C}_{\text{MLE}}$ and rank-deficient-safe simplex-projected Richardson-Lucy / EM iteration for $\hat{f}_{\text{MLE}}$ on the 3-simplex $\Delta^2$.
 
 ## 5. Priority 3: Calibration protocol (MESF, bead size, and gate controls)
 
@@ -90,20 +90,20 @@ When biological or technical replicates exhibit variance exceeding Poisson-Multi
 2. **Bead size and scatter-area calibration (`BeadSizeCalibration`, `fit_bead_size_calibration`, `predict_equivalent_diameter_um`):**
    - Relates optical/scatter area ($\mu\text{m}^2$) to spherical cross-sectional area $\pi (D/2)^2 = a \cdot \text{Area} + b$ (for example $\pi (D/2)^2 = 1.26 \cdot \text{Area} - 5.67$, $R^2 > 0.999$).
 3. **Independent gate-confusion and detection-efficiency estimation (`estimate_gate_calibration`):**
-   - Estimates the $3 \times 3$ confusion matrix $M_{\text{conf}}$ from single-state positive controls (intact-like, compromised-like, dead-like) after subtracting `clay_blank_counts` from a clay-only matrix blank, and estimates `detection_efficiency` from spiked vs. recovered control cell counts.
+   - Estimates the $3 \times 3$ confusion matrix $M_{\text{conf}}$ from single-state positive controls (intact-like, compromised-like, dead-like) after subtracting `clay_blank_counts` from a clay-only matrix blank (requiring positive net biological events above the blank in every control column before applying pseudocount smoothing), and estimates `detection_efficiency` from spiked vs. recovered control cell counts (enforcing per-control recovery $\le 100\%$).
 
 ## 6. Priority 4: Uncertainty propagation and identifiability / equifinality analysis
 
-- **Uncertainty propagation (`concentration_uncertainty`):** Propagates Poisson cell-count shot noise ($1/N_{\text{obs}}$), bead-count shot noise ($1/B_{\text{events}}$), and relative standard deviations in extraction recovery (`rel_sd_recovery`), detection efficiency (`rel_sd_efficiency`), and bead addition (`rel_sd_beads_added`) into a standard error and log-normal 95% confidence interval (`ConcentrationUncertainty`). For zero-event samples ($N_{\text{obs}} = 0$), it reports the exact one-sided 97.5% Poisson upper limit ($-\log(0.025) \approx 3.6889$ events scaled by the volume/bead factor).
+- **Uncertainty propagation (`concentration_uncertainty`):** Propagates Poisson cell-count shot noise ($1/N_{\text{obs}}$), bead-count shot noise ($1/B_{\text{events}}$), and relative standard deviations in extraction recovery (`rel_sd_recovery`), detection efficiency (`rel_sd_efficiency`), and bead addition (`rel_sd_beads_added`) into a standard error and 95% confidence interval (`ConcentrationUncertainty`) that envelopes both the log-normal delta-method interval and the exact Garwood / Wilson-Hilferty Poisson count interval at low event counts ($N_{\text{obs}} \ge 1$). For zero-event samples ($N_{\text{obs}} = 0$), it reports the exact one-sided 97.5% Poisson upper limit ($-\log(0.025) \approx 3.6889$ events scaled by the volume/bead factor and multiplicative uncertainty).
 - **Structural and numerical identifiability (`check_parameter_identifiability`):**
   - Audits the determinant and Frobenius condition number $\kappa_F(M_{\text{conf}})$ of the $3 \times 3$ confusion matrix.
   - Flags the structural scale collinearity of $(C, r, \eta)$: because count expectations depend only on the product $C \cdot r \cdot \eta$, latent concentration $C$ is unidentifiable unless $r$ and $\eta$ are fixed by independent controls.
-- **Equifinality testing (`evaluate_equifinality`):** Compares candidate biological states or mechanisms (`state_a`, `state_b`) via $|\Delta \ell_{\text{joint}}|$, gate KL divergence, and exact joint Poisson-Multinomial KL divergence.
+- **Equifinality testing (`evaluate_equifinality`):** Compares candidate biological states or mechanisms (`state_a`, `state_b`) via $|\Delta \ell_{\text{joint}}|$, gate KL divergence, and exact joint Poisson-Multinomial KL divergence, requiring both finite log-likelihood closeness ($|\Delta \ell_{\text{joint}}| \le \text{loglik\_threshold}$) and distributional closeness ($\text{joint\_kl\_divergence} \le \text{kl\_threshold}$) before declaring two states equifinal.
 
 ## 7. Priority 5: Held-out validation and posterior-predictive checks
 
-- `split_train_holdout` partitions vessels or time points into training and held-out validation subsets.
-- `posterior_predictive_check` evaluates out-of-sample predictions on held-out observations, reporting `total_heldout_loglikelihood`, `mean_count_abs_z`, Pearson `gate_chi2_statistic`, 95% predictive count coverage (`empirical_coverage_95`), and the Freeman-Tukey discrepancy `posterior_predictive_p_value`.
+- `split_train_holdout` partitions vessels or time points into training and held-out validation subsets (rejecting out-of-bounds or duplicate holdout indices).
+- `posterior_predictive_check` evaluates out-of-sample predictions on held-out observations, reporting `total_heldout_loglikelihood`, `mean_count_abs_z`, Pearson `gate_chi2_statistic` (returning `Inf` if positive counts are observed in a zero-expectation gate), symmetric 95% predictive count coverage (`empirical_coverage_95`), and the Freeman-Tukey discrepancy `posterior_predictive_p_value`.
 
 ## 8. Priority 6: Three stakeholder tracks and solver interface contracts
 
@@ -117,14 +117,14 @@ The software contract (`StakeholderTrackContract`, `OpenFOAMTransportSnap`, `PHR
    - Boundary: `StakeholderTrackContract` requires `primary_endpoint == "maximum_pit_depth_per_coupon"`. Cytometry characterizes sampled populations (`:effluent`, `:planktonic`, `:detached_biofilm`) and cannot displace coupon pit depth or establish pore-scale biofilm structure on its own.
 3. **Track 3 (`:track3_bitumen_rheology` - Bitumen emulsion and interfacial rheology, separate validation track):**
    - Uses Julia for constitutive-law fitting and uncertainty analysis and OpenFOAM for multiphase/interfacial flow, validated against Dynamic Shear Rheometer (DSR) and moisture-susceptibility data.
-   - Boundary: `StakeholderTrackContract` rejects `requires_fcm_observer == true` or `requires_phreeqc == true` on `:track3_bitumen_rheology`. Shared numerical infrastructure does not imply shared physical parameters.
+   - Boundary: `StakeholderTrackContract` and `build_production_audit_record` reject attaching flow-cytometry observation models or PHREEQC speciation models to `:track3_bitumen_rheology`. Shared numerical infrastructure does not imply shared physical parameters.
 
 ## 9. Priority 7: Production acceptance checklist and epistemic status accounting
 
-`EpistemicQuantity` and `build_production_audit_record` require every production audit bundle to record `MODEL_ADAPTER_VERSION`, the 64-character SHA-256 input digest, and explicit separation of `:observed`, `:calibrated`, `:assumed`, and `:predicted` quantities:
+`EpistemicQuantity` and `build_production_audit_record` require every production audit bundle to record `MODEL_ADAPTER_VERSION`, the 64-character SHA-256 input digest, unique quantity names, and explicit separation of `:observed`, `:calibrated`, `:assumed`, and `:predicted` quantities:
 
 - [x] Raw cytometry schema (`code/flow_cytometry_samples_template.csv`) validated against `REQUIRED_CSV_COLUMNS` via `validate_sample_csv_header`.
 - [x] Calibration confusion matrix, detection efficiency, MESF curves, bead size curves, and extraction recovery estimated from independent control constructors (`estimate_gate_calibration`, `fit_mesf_calibration`, `fit_bead_size_calibration`).
 - [x] Solver snapshots (`OpenFOAMTransportSnap`, `PHREEQCSpeciationSnap`) checked for exact vessel, time, and compartment alignment via `validate_solver_observation_alignment`.
-- [x] Unit test suite (`code/test_FlowCytometryObservationModel.jl`) executed locally in Julia 1.13.1 (`96/96` passing assertions) covering concentration-likelihood consistency, synthetic-data recovery, zero/low counts, uncertainty propagation, equifinality, and held-out posterior-predictive checks.
+- [x] Unit test suite (`code/test_FlowCytometryObservationModel.jl`) executed locally in Julia 1.13.1 (`118/118` passing assertions) covering concentration-likelihood consistency, synthetic-data recovery, zero/low counts, uncertainty propagation, equifinality, and held-out posterior-predictive checks.
 - [x] All outputs explicitly tagged as `:observed`, `:calibrated`, `:assumed`, or `:predicted` via `EpistemicQuantity` and `ProductionAuditRecord`.

@@ -387,9 +387,32 @@ function _rand_poisson_knuth(rng::AbstractRNG, λ::Float64)
     return k - 1
 end
 
+function _rand_poisson_atkinson(rng::AbstractRNG, λ::Float64)
+    c = 0.767 - 3.36 / λ
+    beta = pi / sqrt(3.0 * λ)
+    alpha = beta * λ
+    k = log(c) - λ - log(beta)
+    log_lam = log(λ)
+    while true
+        u = rand(rng)
+        (u <= 0.0 || u >= 1.0) && continue
+        x = (alpha - log((1.0 - u) / u)) / beta
+        x + 0.5 < 0.0 && continue
+        n = floor(Int, x + 0.5)
+        v = rand(rng)
+        v <= 0.0 && continue
+        y = alpha - beta * x
+        lhs = y + log(v / (1.0 + exp(y))^2)
+        rhs = k + n * log_lam - _loggamma_positive(Float64(n) + 1.0)
+        if lhs <= rhs
+            return n
+        end
+    end
+end
+
 function _rand_poisson(rng::AbstractRNG, λ::Float64)
     λ <= 0.0 && return 0
-    if λ <= 10_000.0
+    if λ <= 64.0
         # Exact Poisson draw via independent additive decomposition into chunks <= 12.0
         total = 0
         rem = λ
@@ -402,9 +425,8 @@ function _rand_poisson(rng::AbstractRNG, λ::Float64)
         end
         return total
     else
-        z = randn(rng)
-        val = round(Int, λ + sqrt(λ) * z)
-        return max(0, val)
+        # Exact Poisson draw via Atkinson (1979) logistic rejection method
+        return _rand_poisson_atkinson(rng, λ)
     end
 end
 
@@ -482,6 +504,27 @@ function _project_simplex3(v::AbstractVector{Float64})
     return s > 0 ? w ./ s : [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]
 end
 
+function _solve3x3_safe(m::AbstractMatrix{Float64}, rhs::AbstractVector{Float64})
+    d = m[1,1] * (m[2,2]*m[3,3] - m[2,3]*m[3,2]) -
+        m[1,2] * (m[2,1]*m[3,3] - m[2,3]*m[3,1]) +
+        m[1,3] * (m[2,1]*m[3,2] - m[2,2]*m[3,1])
+    abs(d) <= 1e-10 && return [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]
+    inv11 =  (m[2,2]*m[3,3] - m[2,3]*m[3,2]) / d
+    inv12 = -(m[1,2]*m[3,3] - m[1,3]*m[3,2]) / d
+    inv13 =  (m[1,2]*m[2,3] - m[1,3]*m[2,2]) / d
+    inv21 = -(m[2,1]*m[3,3] - m[2,3]*m[3,1]) / d
+    inv22 =  (m[1,1]*m[3,3] - m[1,3]*m[3,1]) / d
+    inv23 = -(m[1,1]*m[2,3] - m[1,3]*m[2,1]) / d
+    inv31 =  (m[2,1]*m[3,2] - m[2,2]*m[3,1]) / d
+    inv32 = -(m[1,1]*m[3,2] - m[1,2]*m[3,1]) / d
+    inv33 =  (m[1,1]*m[2,2] - m[1,2]*m[2,1]) / d
+    return [
+        inv11 * rhs[1] + inv12 * rhs[2] + inv13 * rhs[3],
+        inv21 * rhs[1] + inv22 * rhs[2] + inv23 * rhs[3],
+        inv31 * rhs[1] + inv32 * rhs[2] + inv33 * rhs[3],
+    ]
+end
+
 """
 Recover the maximum-likelihood `CellStatePrediction` from one or more `FCMSampleSummary`
 observations from the same `sample_origin` compartment given a known `GateCalibration`.
@@ -513,11 +556,12 @@ function recover_latent_state_mle(samples::AbstractVector{FCMSampleSummary},
     q_emp = total_counts ./ n_sum
     Cmat = calibration.confusion
     # Multiplicative EM / Richardson-Lucy updates on the 3-simplex, guaranteed to
-    # monotonically increase the multinomial log-likelihood on the simplex.
-    f = _project_simplex3(Cmat \ q_emp)
-    f = clamp.(f, 1e-9, 1.0)
+    # monotonically increase the multinomial log-likelihood on the simplex and never
+    # fail on rank-deficient confusion matrices.
+    f_inv = _project_simplex3(_solve3x3_safe(Cmat, q_emp))
+    f = 0.85 .* f_inv .+ 0.15 .* [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]
     f ./= sum(f)
-    for _ in 1:400
+    for _ in 1:600
         p = Cmat * f
         ratio = [q_emp[i] / max(p[i], 1e-15) for i in 1:3]
         f_next = f .* (transpose(Cmat) * ratio)
@@ -687,13 +731,16 @@ function estimate_gate_calibration(control_counts::AbstractMatrix{<:Real};
 
     corrected = zeros(Float64, 3, 3)
     for j in 1:3
+        net_colsum = 0.0
         for i in 1:3
             val = Float64(control_counts[i, j])
             isfinite(val) && val >= 0 || throw(ArgumentError("control_counts entries must be >= 0"))
-            corrected[i, j] = max(0.0, val - blank[i]) + pc
+            net_val = max(0.0, val - blank[i])
+            net_colsum += net_val
+            corrected[i, j] = net_val + pc
         end
+        net_colsum > 0 || throw(ArgumentError("control column $j has zero net events after blank subtraction"))
         colsum = sum(@view corrected[:, j])
-        colsum > 0 || throw(ArgumentError("control column $j has zero net events after blank subtraction"))
         corrected[:, j] ./= colsum
     end
 
@@ -707,9 +754,10 @@ function estimate_gate_calibration(control_counts::AbstractMatrix{<:Real};
         m_vec = Float64.(measured_control_cells)
         all(x -> isfinite(x) && x > 0, s_vec) || throw(ArgumentError("spiked_cells entries must be > 0"))
         all(x -> isfinite(x) && x > 0, m_vec) || throw(ArgumentError("measured_control_cells entries must be > 0"))
+        all(k -> m_vec[k] <= s_vec[k], eachindex(s_vec)) ||
+            throw(ArgumentError("each measured_control_cells entry cannot exceed its corresponding spiked_cells entry"))
         s_sum = sum(s_vec)
         m_sum = sum(m_vec)
-        m_sum <= s_sum || throw(ArgumentError("measured_control_cells sum ($m_sum) cannot exceed spiked_cells sum ($s_sum)"))
         det_eff = m_sum / s_sum
     end
     return GateCalibration(corrected; detection_efficiency=det_eff)
@@ -725,6 +773,24 @@ struct ConcentrationUncertainty
     relative_sd::Float64
     ci_95_lower::Float64
     ci_95_upper::Float64
+end
+
+function _garwood_poisson_95_events(n::Int)
+    if n == 0
+        return (0.0, 3.6888794541139363)
+    elseif n == 1
+        return (0.025317807984289886, 5.571643390992898)
+    elseif n == 2
+        return (0.2422092777972947, 7.224687665243912)
+    else
+        z95 = 1.959963984540054
+        # Exact Wilson-Hilferty chi-square quantile approximation for 2n and 2(n+1) d.o.f.
+        k_lo = 2.0 * n
+        lo = 0.5 * k_lo * max(0.0, 1.0 - 2.0 / (9.0 * k_lo) - z95 * sqrt(2.0 / (9.0 * k_lo)))^3
+        k_hi = 2.0 * (n + 1)
+        hi = 0.5 * k_hi * (1.0 - 2.0 / (9.0 * k_hi) + z95 * sqrt(2.0 / (9.0 * k_hi)))^3
+        return (lo, hi)
+    end
 end
 
 """
@@ -747,23 +813,44 @@ function concentration_uncertainty(sample::FCMSampleSummary;
     n_cells = sum(sample.gate_counts)
     v_eff = effective_sample_volume_ml(sample)
     de = Float64(detection_efficiency)
+    scale_factor = sample.beads_added / (sample.bead_events * v_eff * sample.extraction_recovery * de)
+    mult_rel_var = (1.0 / sample.bead_events) + rr^2 + re^2 + rb^2
 
     if n_cells == 0
         # Exact one-sided 97.5% Poisson upper limit (-log(0.025) = 3.6888794541139363 events)
-        upper_events = 3.6888794541139363
-        scale_factor = (sample.beads_added / (sample.bead_events * v_eff * sample.extraction_recovery * de))
-        ci_upper = upper_events * scale_factor * sqrt(1.0 + rr^2 + re^2 + rb^2)
+        _, upper_events = _garwood_poisson_95_events(0)
+        ci_upper = upper_events * scale_factor * sqrt(1.0 + mult_rel_var)
         return ConcentrationUncertainty(0.0, scale_factor, Inf, 0.0, ci_upper)
     end
 
-    rel_var = (1.0 / n_cells) + (1.0 / sample.bead_events) + rr^2 + re^2 + rb^2
+    rel_var = (1.0 / n_cells) + mult_rel_var
     rel_sd = sqrt(rel_var)
     se = c_hat * rel_sd
     sigma_log = sqrt(log(1.0 + rel_var))
     z95 = 1.959963984540054
-    ci_lower = c_hat * exp(-z95 * sigma_log)
-    ci_upper = c_hat * exp(z95 * sigma_log)
+    lognorm_lower = c_hat * exp(-z95 * sigma_log)
+    lognorm_upper = c_hat * exp(z95 * sigma_log)
+
+    gar_lo, gar_hi = _garwood_poisson_95_events(n_cells)
+    sigma_mult_log = sqrt(log(1.0 + mult_rel_var))
+    garwood_lower = (gar_lo * scale_factor) * exp(-z95 * sigma_mult_log)
+    garwood_upper = (gar_hi * scale_factor) * exp(z95 * sigma_mult_log)
+
+    ci_lower = min(lognorm_lower, garwood_lower)
+    ci_upper = max(lognorm_upper, garwood_upper)
     return ConcentrationUncertainty(c_hat, se, rel_sd, ci_lower, ci_upper)
+end
+
+function concentration_uncertainty(sample::FCMSampleSummary,
+                                   calibration::GateCalibration;
+                                   rel_sd_recovery::Real=0.0,
+                                   rel_sd_efficiency::Real=0.0,
+                                   rel_sd_beads_added::Real=0.0)
+    return concentration_uncertainty(sample;
+        detection_efficiency=calibration.detection_efficiency,
+        rel_sd_recovery=rel_sd_recovery,
+        rel_sd_efficiency=rel_sd_efficiency,
+        rel_sd_beads_added=rel_sd_beads_added)
 end
 
 function _det3x3(m::AbstractMatrix{Float64})
@@ -800,9 +887,11 @@ Reports:
 """
 function check_parameter_identifiability(calibration::GateCalibration;
                                          condition_threshold::Real=50.0)
+    ct = Float64(condition_threshold)
+    isfinite(ct) && ct > 0 || throw(ArgumentError("condition_threshold must be finite and > 0"))
     det_val = _det3x3(calibration.confusion)
     cond_val = _frobenius_cond3x3(calibration.confusion)
-    well_conditioned = isfinite(cond_val) && cond_val <= Float64(condition_threshold)
+    well_conditioned = isfinite(cond_val) && cond_val <= ct
     return (
         gate_fractions_identifiable = well_conditioned,
         confusion_determinant = det_val,
@@ -820,11 +909,17 @@ function evaluate_equifinality(samples::AbstractVector{FCMSampleSummary},
                                state_a::CellStatePrediction,
                                state_b::CellStatePrediction,
                                calibration::GateCalibration;
-                               loglik_threshold::Real=2.0)
+                               loglik_threshold::Real=2.0,
+                               kl_threshold::Real=1.0)
     isempty(samples) && throw(ArgumentError("samples must not be empty"))
+    llt = Float64(loglik_threshold)
+    klt = Float64(kl_threshold)
+    isfinite(llt) && llt >= 0 || throw(ArgumentError("loglik_threshold must be finite and >= 0"))
+    isfinite(klt) && klt >= 0 || throw(ArgumentError("kl_threshold must be finite and >= 0"))
+
     ll_a = sum(joint_loglikelihood(s, state_a, calibration) for s in samples)
     ll_b = sum(joint_loglikelihood(s, state_b, calibration) for s in samples)
-    delta_ll = abs(ll_a - ll_b)
+    delta_ll = (ll_a == ll_b) ? 0.0 : abs(ll_a - ll_b)
 
     pa = predicted_gate_probabilities(state_a, calibration)
     pb = predicted_gate_probabilities(state_b, calibration)
@@ -847,13 +942,16 @@ function evaluate_equifinality(samples::AbstractVector{FCMSampleSummary},
         joint_kl += count_kl + la * gate_kl
     end
 
+    is_equifinal = isfinite(ll_a) && isfinite(ll_b) &&
+                   (delta_ll <= llt) && (joint_kl <= klt)
+
     return (
         loglikelihood_a = ll_a,
         loglikelihood_b = ll_b,
         abs_delta_loglikelihood = delta_ll,
         gate_kl_divergence = gate_kl,
         joint_kl_divergence = joint_kl,
-        equifinal = delta_ll <= Float64(loglik_threshold),
+        equifinal = is_equifinal,
     )
 end
 
@@ -881,6 +979,7 @@ function split_train_holdout(samples::AbstractVector{FCMSampleSummary},
     mask = falses(length(samples))
     for idx in holdout_indices
         1 <= idx <= length(samples) || throw(ArgumentError("holdout index $idx out of bounds"))
+        !mask[idx] || throw(ArgumentError("duplicate holdout index $idx"))
         mask[idx] = true
     end
     return split_train_holdout(samples, mask)
@@ -916,6 +1015,9 @@ function posterior_predictive_check(heldout_samples::AbstractVector{FCMSampleSum
 
     lambdas = Vector{Float64}(undef, m)
     probs = Vector{Vector{Float64}}(undef, m)
+    k_tail = floor(Int, 0.025 * n_draws)
+    lo_idx = k_tail + 1
+    hi_idx = n_draws - k_tail
 
     for j in 1:m
         s = heldout_samples[j]
@@ -933,6 +1035,8 @@ function posterior_predictive_check(heldout_samples::AbstractVector{FCMSampleSum
         for i in 1:3
             if exp_tuple[i] > 0
                 chi2_sum += (s.gate_counts[i] - exp_tuple[i])^2 / exp_tuple[i]
+            elseif s.gate_counts[i] > 0
+                chi2_sum = Inf
             end
         end
 
@@ -941,8 +1045,6 @@ function posterior_predictive_check(heldout_samples::AbstractVector{FCMSampleSum
             sim_totals[d] = _rand_poisson(rng, λ)
         end
         sort!(sim_totals)
-        lo_idx = max(1, floor(Int, 0.025 * n_draws))
-        hi_idx = min(n_draws, ceil(Int, 0.975 * n_draws))
         if sim_totals[lo_idx] <= obs_n <= sim_totals[hi_idx]
             covered_count += 1
         end
@@ -989,7 +1091,10 @@ struct OpenFOAMTransportSnap
     function OpenFOAMTransportSnap(vessel_id::AbstractString, time_h::Real, compartment::Symbol;
                                    velocity_m_s::Real, wall_shear_pa::Real,
                                    residence_time_s::Real, detachment_flux_cells_m2_s::Real=0.0)
-        !isempty(strip(vessel_id)) || throw(ArgumentError("vessel_id must be non-empty"))
+        vid = String(strip(vessel_id))
+        !isempty(vid) || throw(ArgumentError("vessel_id must be non-empty"))
+        compartment in VALID_SAMPLE_ORIGINS ||
+            throw(ArgumentError("compartment must be one of $(VALID_SAMPLE_ORIGINS)"))
         th = Float64(time_h)
         vel = Float64(velocity_m_s)
         sh = Float64(wall_shear_pa)
@@ -1000,7 +1105,7 @@ struct OpenFOAMTransportSnap
         isfinite(sh) && sh >= 0 || throw(ArgumentError("wall_shear_pa must be finite and >= 0"))
         isfinite(rt) && rt > 0 || throw(ArgumentError("residence_time_s must be finite and > 0"))
         isfinite(df) && df >= 0 || throw(ArgumentError("detachment_flux_cells_m2_s must be finite and >= 0"))
-        new(String(vessel_id), th, compartment, vel, sh, rt, df)
+        new(vid, th, compartment, vel, sh, rt, df)
     end
 end
 
@@ -1019,7 +1124,8 @@ struct PHREEQCSpeciationSnap
                                    pH::Real, pe::Real, ionic_strength_M::Real,
                                    ca_mol_L::Real=0.0, mg_mol_L::Real=0.0,
                                    fe2_mol_L::Real=0.0, sulfide_mol_L::Real=0.0)
-        !isempty(strip(vessel_id)) || throw(ArgumentError("vessel_id must be non-empty"))
+        vid = String(strip(vessel_id))
+        !isempty(vid) || throw(ArgumentError("vessel_id must be non-empty"))
         th = Float64(time_h)
         ph_v = Float64(pH)
         pe_v = Float64(pe)
@@ -1034,7 +1140,7 @@ struct PHREEQCSpeciationSnap
         isfinite(is_v) && is_v >= 0 || throw(ArgumentError("ionic_strength_M must be >= 0"))
         all(x -> isfinite(x) && x >= 0, (ca, mg, fe2, s2)) ||
             throw(ArgumentError("species concentrations must be finite and >= 0"))
-        new(String(vessel_id), th, ph_v, pe_v, is_v, ca, mg, fe2, s2)
+        new(vid, th, ph_v, pe_v, is_v, ca, mg, fe2, s2)
     end
 end
 
@@ -1080,20 +1186,24 @@ function validate_solver_observation_alignment(sample::FCMSampleSummary,
                                                transport::Union{Nothing,OpenFOAMTransportSnap}=nothing,
                                                chemistry::Union{Nothing,PHREEQCSpeciationSnap}=nothing,
                                                atol_time_h::Real=1e-6)
+    vid = String(strip(sample_vessel_id))
+    !isempty(vid) || throw(ArgumentError("sample_vessel_id must be non-empty"))
     th = Float64(sample_time_h)
     isfinite(th) && th >= 0 || throw(ArgumentError("sample_time_h must be finite and >= 0"))
+    atol_t = Float64(atol_time_h)
+    isfinite(atol_t) && atol_t >= 0 || throw(ArgumentError("atol_time_h must be finite and >= 0"))
     if transport !== nothing
-        transport.vessel_id == sample_vessel_id ||
-            throw(ArgumentError("OpenFOAM vessel_id ($(transport.vessel_id)) does not match sample vessel_id ($sample_vessel_id)"))
-        isapprox(transport.time_h, th; atol=atol_time_h, rtol=0.0) ||
+        transport.vessel_id == vid ||
+            throw(ArgumentError("OpenFOAM vessel_id ($(transport.vessel_id)) does not match sample vessel_id ($vid)"))
+        isapprox(transport.time_h, th; atol=atol_t, rtol=0.0) ||
             throw(ArgumentError("OpenFOAM time_h ($(transport.time_h)) does not match sample time_h ($th)"))
         transport.compartment == sample.sample_origin ||
             throw(ArgumentError("OpenFOAM compartment ($(transport.compartment)) does not match sample_origin ($(sample.sample_origin))"))
     end
     if chemistry !== nothing
-        chemistry.vessel_id == sample_vessel_id ||
-            throw(ArgumentError("PHREEQC vessel_id ($(chemistry.vessel_id)) does not match sample vessel_id ($sample_vessel_id)"))
-        isapprox(chemistry.time_h, th; atol=atol_time_h, rtol=0.0) ||
+        chemistry.vessel_id == vid ||
+            throw(ArgumentError("PHREEQC vessel_id ($(chemistry.vessel_id)) does not match sample vessel_id ($vid)"))
+        isapprox(chemistry.time_h, th; atol=atol_t, rtol=0.0) ||
             throw(ArgumentError("PHREEQC time_h ($(chemistry.time_h)) does not match sample time_h ($th)"))
     end
     return true
@@ -1123,10 +1233,11 @@ struct EpistemicQuantity{T}
 
     function EpistemicQuantity(name::AbstractString, value::T, status::Symbol,
                                source_note::AbstractString="") where {T}
-        !isempty(strip(name)) || throw(ArgumentError("quantity name must be non-empty"))
+        nm = String(strip(name))
+        !isempty(nm) || throw(ArgumentError("quantity name must be non-empty"))
         status in VALID_EPISTEMIC_STATUSES ||
             throw(ArgumentError("epistemic status must be one of $(VALID_EPISTEMIC_STATUSES)"))
-        new{T}(String(name), value, status, String(source_note))
+        new{T}(nm, value, status, String(source_note))
     end
 end
 
@@ -1152,11 +1263,20 @@ function build_production_audit_record(; track::Symbol,
                                        heldout_validated::Bool=false)
     track in VALID_STAKEHOLDER_TRACKS ||
         throw(ArgumentError("track must be one of $(VALID_STAKEHOLDER_TRACKS)"))
+    track != :track3_bitumen_rheology ||
+        throw(ArgumentError("track3_bitumen_rheology must not attach a flow-cytometry observation sample"))
     digest = lowercase(strip(String(input_sha256)))
     occursin(r"^[0-9a-f]{64}$", digest) ||
         throw(ArgumentError("input_sha256 must be a valid 64-character lowercase hex SHA-256 digest"))
 
-    present_statuses = Set(q.status for q in quantities)
+    seen_names = Set{String}()
+    present_statuses = Set{Symbol}()
+    for q in quantities
+        !(q.name in seen_names) ||
+            throw(ArgumentError("duplicate quantity name '$(q.name)' in production audit record"))
+        push!(seen_names, q.name)
+        push!(present_statuses, q.status)
+    end
     for req in VALID_EPISTEMIC_STATUSES
         req in present_statuses ||
             throw(ArgumentError("production audit record must explicitly include at least one :$req quantity"))

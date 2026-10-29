@@ -13,7 +13,7 @@ This bundle contains the presentations, PDF review copies, preview images, origi
 
 ## Code and data template
 - `code/FlowCytometryObservationModel.jl` - standalone Julia observation-model adapter (`MODEL_ADAPTER_VERSION = "0.2.0"`), implementing explicit volume-convention handling (`:aliquot_post_dilution`, `:undiluted_equivalent`, `:beads_co_diluted`), exact MLE concentration-likelihood consistency checks, Poisson-Multinomial and Negative-Binomial/Dirichlet-Multinomial likelihoods, synthetic-data simulation and parameter recovery, MESF and bead-size calibration curves (`MESFCalibrationCurve`, `BeadSizeCalibration`), independent control gate calibration with clay-blank subtraction, uncertainty propagation, identifiability/equifinality audits, held-out posterior-predictive checks, solver alignment contracts (`OpenFOAMTransportSnap`, `PHREEQCSpeciationSnap`, `StakeholderTrackContract`), and epistemic status accounting (`EpistemicQuantity`, `ProductionAuditRecord`). Not merged into external OpenFOAM or PHREEQC solver repositories.
-- `code/test_FlowCytometryObservationModel.jl` - unit and verification test suite executed locally with Julia 1.13.1 (`julia --startup-file=no code/test_FlowCytometryObservationModel.jl`, `96/96` passing assertions across all 7 audit priorities).
+- `code/test_FlowCytometryObservationModel.jl` - unit and verification test suite executed locally with Julia 1.13.1 (`julia --startup-file=no code/test_FlowCytometryObservationModel.jl`, `118/118` passing assertions across all 7 audit priorities).
 - `code/flow_cytometry_samples_template.csv` - empty sample schema template validated against `REQUIRED_CSV_COLUMNS`, not real experimental data.
 
 ## Specification and build files
@@ -25,7 +25,7 @@ This bundle contains the presentations, PDF review copies, preview images, origi
 `previews/` contains render previews of slides 21-22 and all four slides of the separate four-slide discussion deck.
 
 ## Scientific boundary
-Flow cytometry is treated as an observation layer for sampled cell populations (`:effluent`, `:planktonic`, `:detached_biofilm`). It does not directly measure in situ pore-scale spatial structure, EPS cross-link density, mineral phases, or corrosion rates. Cytometry gates, extraction recovery, staining, and debris/aggregate controls require assay-specific empirical validation. The software adapter and its 96/96 passing unit tests verify mathematical consistency, synthetic parameter recovery, calibration algebra, and data-contract enforcement; they do not substitute for empirical wet-lab calibration or coupled multiphysics validation.
+Flow cytometry is treated as an observation layer for sampled cell populations (`:effluent`, `:planktonic`, `:detached_biofilm`). It does not directly measure in situ pore-scale spatial structure, EPS cross-link density, mineral phases, or corrosion rates. Cytometry gates, extraction recovery, staining, and debris/aggregate controls require assay-specific empirical validation. The software adapter and its 118/118 passing unit tests verify mathematical consistency, synthetic parameter recovery, calibration algebra, and data-contract enforcement; they do not substitute for empirical wet-lab calibration or coupled multiphysics validation.
 
 ## Integrity
 `SHA256SUMS.txt` provides SHA-256 digests for every other file in this bundle. `DELIVERY_MANIFEST.json` records relative paths, byte sizes, SHA-256 digests, presentation slide counts, and the local Julia test execution record.

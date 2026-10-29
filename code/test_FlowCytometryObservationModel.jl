@@ -135,6 +135,23 @@ using .FlowCytometryObservationModel
         # Pooling across distinct sample_origin compartments is rejected
         mixed_origins = [replicates[1], boundary_sample[1]]
         @test_throws ArgumentError recover_latent_state_mle(mixed_origins, cal)
+
+        # Rank-deficient (singular) confusion matrix does not throw SingularException in EM recovery
+        singular_cal = GateCalibration([0.5 0.5 0.0;
+                                        0.5 0.5 0.0;
+                                        0.0 0.0 1.0]; detection_efficiency=0.90)
+        rec_sing = recover_latent_state_mle([sample], singular_cal)
+        @test isfinite(rec_sing.total_cells_per_ml)
+        @test isapprox(sum(rec_sing.fractions), 1.0; atol=1e-6)
+        @test isapprox(rec_sing.fractions[3], 0.05; atol=1e-4)
+
+        # Exact Atkinson Poisson sampling at high event counts (lambda > 10,000)
+        high_state = CellStatePrediction(2.0e8, (0.60, 0.25, 0.15))
+        high_sample = simulate_fcm_sample(high_state, cal;
+            beads_added=50_000, sample_volume_ml=0.5,
+            dilution_factor=1.0, extraction_recovery=0.95,
+            aspirated_fraction=0.5, sample_origin=:effluent, rng=rng)
+        @test sum(high_sample.gate_counts) > 10_000
     end
 
     # -----------------------------------------------------------------------
@@ -184,6 +201,20 @@ using .FlowCytometryObservationModel
         @test_throws ArgumentError estimate_gate_calibration(raw_controls;
             spiked_cells=[1000.0, 1000.0, 1000.0],
             measured_control_cells=[1200.0, 1000.0, 1000.0])
+
+        # Per-control recovery > 100% is rejected even when sum(measured) <= sum(spiked)
+        @test_throws ArgumentError estimate_gate_calibration(raw_controls;
+            spiked_cells=[1000.0, 1000.0, 1000.0],
+            measured_control_cells=[1200.0, 800.0, 800.0])
+
+        # Control column with zero net events after blank subtraction is rejected even when pseudocount > 0
+        blank_dominated = [2 900 10;
+                           3 50 20;
+                           1 50 970]
+        @test_throws ArgumentError estimate_gate_calibration(blank_dominated;
+            clay_blank_counts=(10, 10, 10), pseudocount=0.0)
+        @test_throws ArgumentError estimate_gate_calibration(blank_dominated;
+            clay_blank_counts=(10, 10, 10), pseudocount=0.5)
     end
 
     # -----------------------------------------------------------------------
@@ -199,12 +230,27 @@ using .FlowCytometryObservationModel
         @test unc.ci_95_lower < unc.estimate_cells_per_ml < unc.ci_95_upper
         @test unc.relative_sd > sqrt(1/100 + 1/90)
 
+        # GateCalibration overload matches keyword detection_efficiency
+        cal_90 = GateCalibration([1 0 0; 0 1 0; 0 0 1]; detection_efficiency=0.9)
+        unc_cal = concentration_uncertainty(sample, cal_90;
+            rel_sd_recovery=0.05, rel_sd_efficiency=0.04, rel_sd_beads_added=0.02)
+        @test unc_cal.estimate_cells_per_ml ≈ unc.estimate_cells_per_ml
+        @test unc_cal.ci_95_lower ≈ unc.ci_95_lower
+        @test unc_cal.ci_95_upper ≈ unc.ci_95_upper
+
         zero_sample = FCMSampleSummary((0, 0, 0);
             bead_events=100, beads_added=10_000, sample_volume_ml=0.1)
         unc_zero = concentration_uncertainty(zero_sample)
         @test unc_zero.estimate_cells_per_ml == 0.0
         @test unc_zero.ci_95_lower == 0.0
         @test unc_zero.ci_95_upper > 0.0
+
+        # Single-event sample (n_cells = 1) covers the exact Garwood 95% Poisson interval
+        one_sample = FCMSampleSummary((1, 0, 0);
+            bead_events=10_000, beads_added=10_000, sample_volume_ml=1.0)
+        unc_one = concentration_uncertainty(one_sample)
+        @test unc_one.ci_95_lower <= -log(0.975)
+        @test unc_one.ci_95_upper >= 5.571643390992898
 
         # Identifiability check on well-conditioned vs degenerate confusion matrices
         id_good = check_parameter_identifiability(identity_gates)
@@ -229,6 +275,23 @@ using .FlowCytometryObservationModel
         @test !eq_sharp.equifinal
         @test eq_sharp.abs_delta_loglikelihood > 20.0
         @test eq_sharp.joint_kl_divergence > 10.0
+
+        # Opposite states tying in log-likelihood on a symmetric sample are not falsely marked equifinal
+        sym_sample = FCMSampleSummary((50, 50, 0);
+            bead_events=100, beads_added=10_000, sample_volume_ml=0.1)
+        st_sym_a = CellStatePrediction(1.0e6, (0.90, 0.10, 0.00))
+        st_sym_b = CellStatePrediction(1.0e6, (0.10, 0.90, 0.00))
+        eq_sym = evaluate_equifinality([sym_sample], st_sym_a, st_sym_b, identity_gates)
+        @test eq_sym.abs_delta_loglikelihood == 0.0
+        @test eq_sym.joint_kl_divergence > 100.0
+        @test !eq_sym.equifinal
+
+        # Two impossible states (-Inf log-likelihood) do not produce NaN abs_delta_loglikelihood
+        st_imp_a = CellStatePrediction(1.0e6, (1.0, 0.0, 0.0))
+        st_imp_b = CellStatePrediction(1.0e6, (0.0, 1.0, 0.0))
+        eq_imp = evaluate_equifinality([sample], st_imp_a, st_imp_b, identity_gates)
+        @test !isnan(eq_imp.abs_delta_loglikelihood)
+        @test !eq_imp.equifinal
     end
 
     # -----------------------------------------------------------------------
@@ -251,6 +314,7 @@ using .FlowCytometryObservationModel
         split = split_train_holdout(all_samples, [19, 20, 21, 22, 23, 24])
         @test length(split.train) == 18
         @test length(split.holdout) == 6
+        @test_throws ArgumentError split_train_holdout(all_samples, [19, 19, 20])
 
         fitted_state = recover_latent_state_mle(split.train, cal)
         pred_states = fill(fitted_state, length(split.holdout))
@@ -264,6 +328,10 @@ using .FlowCytometryObservationModel
         ppc_bad = posterior_predictive_check(split.holdout, fill(wrong_state, 6), cal; n_draws=400, seed=101)
         @test ppc_bad.total_heldout_loglikelihood < ppc_good.total_heldout_loglikelihood - 100.0
         @test ppc_bad.posterior_predictive_p_value < 0.01
+
+        # Zero-expectation gate with positive observed events yields Inf Pearson chi-square
+        ppc_zero_gate = posterior_predictive_check([sample], [CellStatePrediction(1.0e6, (1.0, 0.0, 0.0))], identity_gates; n_draws=50)
+        @test ppc_zero_gate.gate_chi2_statistic == Inf
     end
 
     # -----------------------------------------------------------------------
@@ -309,6 +377,10 @@ using .FlowCytometryObservationModel
             velocity_m_s=0.012, wall_shear_pa=0.45, residence_time_s=1800.0)
         @test_throws ArgumentError validate_solver_observation_alignment(sample, "V07", 168.0;
             transport=of_wrong_comp, chemistry=ph_snap)
+
+        # Invalid compartment symbol in OpenFOAMTransportSnap is rejected at construction
+        @test_throws ArgumentError OpenFOAMTransportSnap("V07", 168.0, :in_situ;
+            velocity_m_s=0.012, wall_shear_pa=0.45, residence_time_s=1800.0)
     end
 
     # -----------------------------------------------------------------------
@@ -340,6 +412,23 @@ using .FlowCytometryObservationModel
             track=:track2_clay_corrosion,
             input_sha256=sha,
             quantities=incomplete_q,
+            sample=sample,
+            calibration=identity_gates)
+
+        # Attaching a flow-cytometry observation sample to Track 3 (bitumen rheology) is rejected
+        @test_throws ArgumentError build_production_audit_record(;
+            track=:track3_bitumen_rheology,
+            input_sha256=sha,
+            quantities=quantities,
+            sample=sample,
+            calibration=identity_gates)
+
+        # Duplicate quantity names with conflicting epistemic statuses are rejected
+        dup_q = vcat(quantities, [EpistemicQuantity("detection_efficiency", 1.0, :assumed, "Contradictory tag")])
+        @test_throws ArgumentError build_production_audit_record(;
+            track=:track2_clay_corrosion,
+            input_sha256=sha,
+            quantities=dup_q,
             sample=sample,
             calibration=identity_gates)
     end
