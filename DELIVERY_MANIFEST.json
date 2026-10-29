@@ -1,0 +1,111 @@
+{
+  "package_name": "Flow Cytometry Model Bridge Complete Delivery Bundle",
+  "created_date": "2026-10-29",
+  "verification": {
+    "main_presentation_slide_count": 22,
+    "main_presentation_original_slide_count": 20,
+    "original_first_20_slide_text_exact_match": true,
+    "separate_ghosh_discussion_slide_count": 4,
+    "main_presentation_pdf_page_count": 22,
+    "ghosh_presentation_pdf_page_count": 4,
+    "julia_tests_executed": false,
+    "integrated_into_existing_openfoam_phreeqc_solvers": false
+  },
+  "files": [
+    {
+      "path": "README_DELIVERY.md",
+      "bytes": 2650,
+      "sha256": "05a1a8a679f551997edbb44e3850ab526ff4bd27f83ef91632e7c519a0f3ea8d"
+    },
+    {
+      "path": "code/FlowCytometryObservationModel.jl",
+      "bytes": 8149,
+      "sha256": "a25e3941b44aded0488384e2859e17b80c5b302cd2b03d1c644b3c7819936459"
+    },
+    {
+      "path": "code/flow_cytometry_samples_template.csv",
+      "bytes": 242,
+      "sha256": "f68fd9fa7cea6dfed84e0f62c745b4da465a6ad0b96917a58598004fa8431a79"
+    },
+    {
+      "path": "code/test_FlowCytometryObservationModel.jl",
+      "bytes": 1189,
+      "sha256": "2937ce5515523bd6ec6e03615ecf9f17df1a481dcc4e19800706c8d5792aad7a"
+    },
+    {
+      "path": "docs/build_flow_cytometry_addendum.py",
+      "bytes": 12059,
+      "sha256": "90430807a583741e87e12907315fed43c821d6903be2661b9293a729f5f35a8f"
+    },
+    {
+      "path": "docs/build_ghosh_fcm_bridge_deck.py",
+      "bytes": 11578,
+      "sha256": "123d3aaca497afdd0847c2a5038b890481370ea21861f5a05883ea55ddfca584"
+    },
+    {
+      "path": "docs/clay_polymer_infrastructure_epistemic_synthesis.md",
+      "bytes": 10779,
+      "sha256": "faa791809bceeb202a5c5056672fe01a8c4d60f10add13ca436e4c60e6b3ebba"
+    },
+    {
+      "path": "docs/flow_cytometry_model_bridge_spec.md",
+      "bytes": 8323,
+      "sha256": "bdc41d0bc1e6791119e7ed55502cb3e85632327adad49083daea967f4e5a321b"
+    },
+    {
+      "path": "presentations/Clay_Microbes_Metal_22slides_Flow_Cytometry_Addendum.pdf",
+      "bytes": 725830,
+      "sha256": "97ff583d4970b6ccb8c7e81d976fe516be1af4ed75e1ead11fbf87bd848e091d"
+    },
+    {
+      "path": "presentations/Clay_Microbes_Metal_22slides_Flow_Cytometry_Addendum.pptx",
+      "bytes": 12123037,
+      "sha256": "7a68b9f2028fdeabb269e20fd736fa9f1cd77af24b82d19a69598ea346823f97"
+    },
+    {
+      "path": "presentations/Single_Cell_Flow_Cytometry_Model_Bridge_Exploratory.pdf",
+      "bytes": 221444,
+      "sha256": "98fa4792bd6d35bff9ed54fab9e3430839cf8b59d4cfe7d860c1e48f407cde67"
+    },
+    {
+      "path": "presentations/Single_Cell_Flow_Cytometry_Model_Bridge_Exploratory.pptx",
+      "bytes": 46742,
+      "sha256": "b2c8a807387f1e7be5372e2ed2d1fba0d7a7b5a68255e2e92b7597b7f65ee90b"
+    },
+    {
+      "path": "previews/Appendix_Slide_21_Flow_Cytometry.png",
+      "bytes": 217569,
+      "sha256": "fc47ac42e43711d557579893221904b9c48fc0f9a0ac09fb1b63f6b4bb95b2ae"
+    },
+    {
+      "path": "previews/Appendix_Slide_22_Model_Bridge.png",
+      "bytes": 211763,
+      "sha256": "1db4412c3e0aa73d4db25e6f42313d1d53f6b51d382babe5ca793ab2e2f8a63d"
+    },
+    {
+      "path": "previews/Ghosh_Bridge_Slide_1.png",
+      "bytes": 175603,
+      "sha256": "8cfff6845e29107d4997632abe9c22aaa11a12ac05ff2ba65d2ecc9876d70030"
+    },
+    {
+      "path": "previews/Ghosh_Bridge_Slide_2.png",
+      "bytes": 183089,
+      "sha256": "bd3a7880477c78314481e9eea4f1c4195e285a930b2ba711ed6a652e894307c0"
+    },
+    {
+      "path": "previews/Ghosh_Bridge_Slide_3.png",
+      "bytes": 190496,
+      "sha256": "fe445f5251545e992cbc24631403225c0433937bf26bc9bb2253a3c139660167"
+    },
+    {
+      "path": "previews/Ghosh_Bridge_Slide_4.png",
+      "bytes": 155721,
+      "sha256": "e6089ed62725515eddf1f6d9eb1a7288cf322f6e2b4017e4765e62de0a84a28a"
+    },
+    {
+      "path": "source/Original_20_slide_Clay_Microbes_Metal_Deck.pptx",
+      "bytes": 12641999,
+      "sha256": "761c99b8047aa248771632747c79cc7a9c7b59c07b22cc36b8a34406445ebb36"
+    }
+  ]
+}
