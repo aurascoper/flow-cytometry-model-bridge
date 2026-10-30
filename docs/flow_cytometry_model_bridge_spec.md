@@ -131,7 +131,7 @@ The software contract (`StakeholderTrackContract`, `OpenFOAMTransportSnap`, `PHR
 
 ## 10. Microfluidic Cell Classification Workbench and Shared 3D Visualization Engine
 
-`code/MicrofluidicClassificationEngine.jl` (`ENGINE_VERSION = "0.2.0"`) extends the standalone observation-model adapter into a complete Julia-first microfluidic single-cell classification engine and interactive browser workbench (`workbench/microfluidic_cytometry_workbench.html`), verified with `606/606` passing Julia unit assertions (`julia --startup-file=no code/test_MicrofluidicClassificationEngine.jl`) and cross-language numerical verification against an independent Python reference implementation (`code/verify_against_python_reference.py`).
+`code/MicrofluidicClassificationEngine.jl` (`ENGINE_VERSION = "0.2.0"`) extends the standalone observation-model adapter into a complete Julia-first microfluidic single-cell classification engine and interactive browser workbench (`workbench/microfluidic_cytometry_workbench.html`), verified with `621/621` passing Julia unit assertions (`julia --startup-file=no code/test_MicrofluidicClassificationEngine.jl`) and cross-language numerical verification against an independent Python reference implementation (`code/verify_against_python_reference.py`).
 
 ### 10.1 Modular Julia architecture
 

@@ -224,9 +224,9 @@ function _build_fcs_text_segment(ds::FCSDataset, datatype::Symbol, endian::Symbo
     push!(pairs, "BIOLOGICAL_REPLICATE" => ds.provenance.biological_replicate)
     push!(pairs, "TIMESTAMP_UTC" => ds.provenance.timestamp_utc)
 
-    bits_val = datatype == :D ? 64 : 32
     for ch in ds.channels
         i = ch.index
+        bits_val = datatype == :D ? 64 : (datatype == :F ? 32 : ch.bits)
         push!(pairs, "\$P$(i)N" => ch.name)
         push!(pairs, "\$P$(i)S" => (isempty(ch.stain) ? ch.name : ch.stain))
         push!(pairs, "\$P$(i)R" => @sprintf("%.0f", ch.range))
@@ -253,7 +253,8 @@ function _build_fcs_text_segment(ds::FCSDataset, datatype::Symbol, endian::Symbo
     return take!(io)
 end
 
-function _encode_fcs_data_segment(events::Matrix{Float64}, datatype::Symbol, endian::Symbol)
+function _encode_fcs_data_segment(ds::FCSDataset, datatype::Symbol, endian::Symbol)
+    events = ds.events
     n_ev, n_ch = size(events)
     io = IOBuffer()
     if datatype == :F
@@ -275,10 +276,20 @@ function _encode_fcs_data_segment(events::Matrix{Float64}, datatype::Symbol, end
     elseif datatype == :I
         for r in 1:n_ev
             for c in 1:n_ch
-                clamped = clamp(round(Int64, events[r, c]), 0, Int64(typemax(UInt32)))
-                val = UInt32(clamped)
-                w = endian == :little ? htol(val) : hton(val)
-                write(io, w)
+                b = ds.channels[c].bits
+                if b == 16
+                    clamped16 = clamp(round(Int64, events[r, c]), 0, Int64(typemax(UInt16)))
+                    val16 = UInt16(clamped16)
+                    write(io, endian == :little ? htol(val16) : hton(val16))
+                elseif b == 64
+                    clamped64 = clamp(round(Int128, events[r, c]), Int128(0), Int128(typemax(UInt64)))
+                    val64 = UInt64(clamped64)
+                    write(io, endian == :little ? htol(val64) : hton(val64))
+                else
+                    clamped32 = clamp(round(Int64, events[r, c]), 0, Int64(typemax(UInt32)))
+                    val32 = UInt32(clamped32)
+                    write(io, endian == :little ? htol(val32) : hton(val32))
+                end
             end
         end
     else
@@ -300,17 +311,17 @@ function serialize_fcs_bytes(ds::FCSDataset; endian::Symbol=:little, datatype::S
     endian in (:little, :big) || throw(ArgumentError("endian must be :little or :big"))
     datatype in (:F, :D, :I) || throw(ArgumentError("datatype must be :F, :D, or :I"))
 
-    data_bytes = _encode_fcs_data_segment(ds.events, datatype, endian)
+    data_bytes = _encode_fcs_data_segment(ds, datatype, endian)
     text_start = 58
     data_start = 58
-    data_end = 58 + length(data_bytes) - 1
+    data_end = isempty(data_bytes) ? 58 : (58 + length(data_bytes) - 1)
     text_bytes = UInt8[]
 
     for _ in 1:6
         text_bytes = _build_fcs_text_segment(ds, datatype, endian, data_start, data_end)
         text_end = text_start + length(text_bytes) - 1
         new_data_start = text_end + 1
-        new_data_end = new_data_start + length(data_bytes) - 1
+        new_data_end = isempty(data_bytes) ? new_data_start : (new_data_start + length(data_bytes) - 1)
         if new_data_start == data_start && new_data_end == data_end
             break
         end
@@ -335,7 +346,9 @@ function serialize_fcs_bytes(ds::FCSDataset; endian::Symbol=:little, datatype::S
     out = Vector{UInt8}(undef, 58 + length(text_bytes) + length(data_bytes))
     copyto!(out, 1, codeunits(header_str), 1, 58)
     copyto!(out, 59, text_bytes, 1, length(text_bytes))
-    copyto!(out, 59 + length(text_bytes), data_bytes, 1, length(data_bytes))
+    if !isempty(data_bytes)
+        copyto!(out, 59 + length(text_bytes), data_bytes, 1, length(data_bytes))
+    end
     return out
 end
 
@@ -418,15 +431,17 @@ function parse_fcs_bytes(bytes::AbstractVector{UInt8};
         throw(ArgumentError("invalid TEXT segment offsets ($text_start .. $text_end)"))
     kw = _parse_fcs_text_keywords(view(bytes, (text_start + 1):(text_end + 1)))
 
-    data_start = hdr_data_start > 0 ? hdr_data_start : parse(Int, get(kw, "\$BEGINDATA", "0"))
-    data_end   = hdr_data_end > 0   ? hdr_data_end   : parse(Int, get(kw, "\$ENDDATA", "0"))
-    0 <= data_start <= data_end < length(bytes) ||
-        throw(ArgumentError("invalid DATA segment offsets ($data_start .. $data_end)"))
-
     n_par = parse(Int, get(kw, "\$PAR", "0"))
     n_tot = parse(Int, get(kw, "\$TOT", "0"))
     n_par >= 1 || throw(ArgumentError("FCS \$PAR must be >= 1"))
     n_tot >= 0 || throw(ArgumentError("FCS \$TOT must be >= 0"))
+
+    data_start = hdr_data_start > 0 ? hdr_data_start : parse(Int, get(kw, "\$BEGINDATA", "0"))
+    data_end   = hdr_data_end > 0   ? hdr_data_end   : parse(Int, get(kw, "\$ENDDATA", "0"))
+    if n_tot > 0
+        0 <= data_start <= data_end < length(bytes) ||
+            throw(ArgumentError("invalid DATA segment offsets ($data_start .. $data_end)"))
+    end
 
     datatype_str = uppercase(get(kw, "\$DATATYPE", "F"))
     byteord_str  = get(kw, "\$BYTEORD", "1,2,3,4")
@@ -447,46 +462,55 @@ function parse_fcs_bytes(bytes::AbstractVector{UInt8};
         channels[i] = FCSChannelMetadata(i, nm; stain=st, range=rg, bits=b, amplification=amp, gain=gn)
     end
 
-    data_slice = view(bytes, (data_start + 1):(data_end + 1))
     events = Matrix{Float64}(undef, n_tot, n_par)
-    io = IOBuffer(data_slice)
-    if datatype_str == "F"
-        expected_bytes = n_tot * n_par * 4
-        length(data_slice) >= expected_bytes ||
-            throw(ArgumentError("DATA segment shorter than expected $expected_bytes bytes for Float32"))
-        for r in 1:n_tot
-            for c in 1:n_par
-                raw = read(io, Float32)
-                val = Float64(is_little ? ltoh(raw) : ntoh(raw))
-                events[r, c] = val
-            end
-        end
-    elseif datatype_str == "D"
-        expected_bytes = n_tot * n_par * 8
-        length(data_slice) >= expected_bytes ||
-            throw(ArgumentError("DATA segment shorter than expected $expected_bytes bytes for Float64"))
-        for r in 1:n_tot
-            for c in 1:n_par
-                raw = read(io, Float64)
-                val = is_little ? ltoh(raw) : ntoh(raw)
-                events[r, c] = val
-            end
-        end
-    elseif datatype_str == "I"
-        for r in 1:n_tot
-            for c in 1:n_par
-                b = channels[c].bits
-                if b == 16
-                    raw = read(io, UInt16)
-                    events[r, c] = Float64(is_little ? ltoh(raw) : ntoh(raw))
-                else
-                    raw = read(io, UInt32)
-                    events[r, c] = Float64(is_little ? ltoh(raw) : ntoh(raw))
+    if n_tot > 0
+        data_slice = view(bytes, (data_start + 1):(data_end + 1))
+        io = IOBuffer(data_slice)
+        if datatype_str == "F"
+            expected_bytes = n_tot * n_par * 4
+            length(data_slice) >= expected_bytes ||
+                throw(ArgumentError("DATA segment shorter than expected $expected_bytes bytes for Float32"))
+            for r in 1:n_tot
+                for c in 1:n_par
+                    raw = read(io, Float32)
+                    val = Float64(is_little ? ltoh(raw) : ntoh(raw))
+                    events[r, c] = val
                 end
             end
+        elseif datatype_str == "D"
+            expected_bytes = n_tot * n_par * 8
+            length(data_slice) >= expected_bytes ||
+                throw(ArgumentError("DATA segment shorter than expected $expected_bytes bytes for Float64"))
+            for r in 1:n_tot
+                for c in 1:n_par
+                    raw = read(io, Float64)
+                    val = is_little ? ltoh(raw) : ntoh(raw)
+                    events[r, c] = val
+                end
+            end
+        elseif datatype_str == "I"
+            bytes_per_event = sum(div(ch.bits, 8) for ch in channels)
+            expected_bytes = n_tot * bytes_per_event
+            length(data_slice) >= expected_bytes ||
+                throw(ArgumentError("DATA segment shorter than expected $expected_bytes bytes for Integer"))
+            for r in 1:n_tot
+                for c in 1:n_par
+                    b = channels[c].bits
+                    if b == 16
+                        raw16 = read(io, UInt16)
+                        events[r, c] = Float64(is_little ? ltoh(raw16) : ntoh(raw16))
+                    elseif b == 64
+                        raw64 = read(io, UInt64)
+                        events[r, c] = Float64(is_little ? ltoh(raw64) : ntoh(raw64))
+                    else
+                        raw32 = read(io, UInt32)
+                        events[r, c] = Float64(is_little ? ltoh(raw32) : ntoh(raw32))
+                    end
+                end
+            end
+        else
+            throw(ArgumentError("unsupported FCS \$DATATYPE '$datatype_str'"))
         end
-    else
-        throw(ArgumentError("unsupported FCS \$DATATYPE '$datatype_str'"))
     end
 
     digest = bytes2hex(SHA.sha256(bytes))
@@ -889,7 +913,8 @@ struct SpilloverMatrix
             isapprox(m[i, i], 1.0; atol=1e-6) ||
                 throw(ArgumentError("SpilloverMatrix diagonal entries must equal 1.0"))
         end
-        abs(det(m)) > 1e-10 || throw(ArgumentError("SpilloverMatrix is singular or nearly singular"))
+        (abs(det(m)) > 1e-6 && cond(m) <= 1e3) ||
+            throw(ArgumentError("SpilloverMatrix is singular or nearly singular"))
         new(chs, m)
     end
 end
@@ -2740,7 +2765,10 @@ function solve_core_multishell_rd(spec::CoreMultishellSpec;
     end
 
     initial_mass = sum(u[i] * shell_vols[i] for i in 1:n_radial_nodes)
-    dt_max = 0.20 * (dr * dr) / maximum(D_node)
+    rate_diff  = 3.5 * maximum(D_node) / (dr * dr)
+    rate_robin = (4.0 * pi * (R_max^2) * spec.membrane_permeability_um_s) / shell_vols[n_radial_nodes]
+    rate_decay = maximum(k_node)
+    dt_max = 0.40 / max(rate_diff + rate_robin + rate_decay, 1e-12)
 
     snapshots = Vector{CoreMultishellSnapshot}(undef, length(times_s))
     t_cur = 0.0
@@ -2776,7 +2804,14 @@ function solve_core_multishell_rd(spec::CoreMultishellSpec;
         strat_means = zeros(Float64, L)
         for l in 1:L
             idxs = [i for i in 1:n_radial_nodes if stratum_idx[i] == l]
-            strat_means[l] = isempty(idxs) ? 0.0 : mean(u[idxs])
+            if !isempty(idxs)
+                strat_means[l] = mean(u[idxs])
+            else
+                r_lo = l == 1 ? 0.0 : spec.radii_um[l - 1]
+                r_mid = 0.5 * (r_lo + spec.radii_um[l])
+                nearest_i = argmin([abs(rc - r_mid) for rc in r_centers])
+                strat_means[l] = u[nearest_i]
+            end
         end
 
         # Local microfluidic channel exposure concentration coupled to single-cell uptake fractions

@@ -86,19 +86,40 @@ def parse_fcs_3_1(fcs_path):
     byteord = keywords["$BYTEORD"]
     endian_prefix = "<" if byteord.startswith("1,2") else ">"
 
+    channels = [keywords[f"$P{i}N"] for i in range(1, n_par + 1)]
+    if n_tot == 0:
+        return {
+            "sha256": sha256_hex,
+            "version": version,
+            "keywords": keywords,
+            "channels": channels,
+            "events": [],
+        }
+
     data_bytes = raw[hdr_data_start : hdr_data_end + 1]
     if datatype == "F":
         fmt = f"{endian_prefix}{n_tot * n_par}f"
         expected_len = n_tot * n_par * 4
+        vals = struct.unpack(fmt, data_bytes[:expected_len])
+        events = [list(vals[r * n_par : (r + 1) * n_par]) for r in range(n_tot)]
     elif datatype == "D":
         fmt = f"{endian_prefix}{n_tot * n_par}d"
         expected_len = n_tot * n_par * 8
+        vals = struct.unpack(fmt, data_bytes[:expected_len])
+        events = [list(vals[r * n_par : (r + 1) * n_par]) for r in range(n_tot)]
+    elif datatype == "I":
+        bits = [int(keywords.get(f"$P{i}B", "32")) for i in range(1, n_par + 1)]
+        row_fmt = endian_prefix + "".join(
+            "H" if b == 16 else ("Q" if b == 64 else "I") for b in bits
+        )
+        row_size = struct.calcsize(row_fmt)
+        events = [
+            [float(x) for x in struct.unpack_from(row_fmt, data_bytes, r * row_size)]
+            for r in range(n_tot)
+        ]
     else:
         raise ValueError(f"Unsupported $DATATYPE: {datatype}")
 
-    vals = struct.unpack(fmt, data_bytes[:expected_len])
-    events = [list(vals[r * n_par : (r + 1) * n_par]) for r in range(n_tot)]
-    channels = [keywords[f"$P{i}N"] for i in range(1, n_par + 1)]
     return {
         "sha256": sha256_hex,
         "version": version,

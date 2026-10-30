@@ -17,10 +17,10 @@
     "julia_test_command": "julia --startup-file=no code/test_FlowCytometryObservationModel.jl && julia --startup-file=no code/test_MicrofluidicClassificationEngine.jl",
     "julia_observation_model_test_passed": 118,
     "julia_observation_model_test_total": 118,
-    "julia_classification_engine_test_passed": 606,
-    "julia_classification_engine_test_total": 606,
-    "julia_test_passed": 724,
-    "julia_test_total": 724,
+    "julia_classification_engine_test_passed": 621,
+    "julia_classification_engine_test_total": 621,
+    "julia_test_passed": 739,
+    "julia_test_total": 739,
     "model_adapter_version": "0.2.0",
     "microfluidic_engine_version": "0.2.0",
     "priorities_implemented": [
@@ -38,7 +38,7 @@
     {
       "path": "README_DELIVERY.md",
       "bytes": 7604,
-      "sha256": "822ab3143398d368919a10c579738eb92fbfadd430c676324683d0e656e65c6f"
+      "sha256": "acd5c03ec0a6c5a1548c3258ee6ecda2e761aeaffcafd1ec2cab4d8456f3eacf"
     },
     {
       "path": "code/FlowCytometryObservationModel.jl",
@@ -47,8 +47,8 @@
     },
     {
       "path": "code/MicrofluidicClassificationEngine.jl",
-      "bytes": 124861,
-      "sha256": "6184c6ca633ee49c4cceb73536df02761e13ae65ab48054ac6ae713fc29b0155"
+      "bytes": 126794,
+      "sha256": "ba727b0b54a7aade7aff7008f9ccd00ba9b9030b67ca7c762d256b57ce21ee8a"
     },
     {
       "path": "code/flow_cytometry_samples_template.csv",
@@ -67,13 +67,13 @@
     },
     {
       "path": "code/test_MicrofluidicClassificationEngine.jl",
-      "bytes": 30612,
-      "sha256": "36d0a4d16a01015a660eec67c93daa2be286d3326aca89d5e16216e52e46179b"
+      "bytes": 32655,
+      "sha256": "e3a9d5bd69e754401177ff0a6ec757eb6adf1cf13fdbdaf7dc51148143ae464a"
     },
     {
       "path": "code/verify_against_python_reference.py",
-      "bytes": 15897,
-      "sha256": "912525657ea9f771bf44f64046b27a81ad602cf79ce54ade44d7d05eadecc2d1"
+      "bytes": 16679,
+      "sha256": "04524e97f0932d887524483408d1db3ef5ddf89f16c8e1a29ba71c87566cf04a"
     },
     {
       "path": "docs/build_flow_cytometry_addendum.py",
@@ -83,7 +83,7 @@
     {
       "path": "docs/build_ghosh_fcm_bridge_deck.py",
       "bytes": 24400,
-      "sha256": "a2606dbaa229e12be31c51d93ab0ac77858facf0d0e5958ed93752fafb43c4b9"
+      "sha256": "0331cb77584f56cb851b5dcd618aafa3aa4e6c7d53167077b177ffd8c2abd213"
     },
     {
       "path": "docs/clay_polymer_infrastructure_epistemic_synthesis.md",
@@ -93,7 +93,7 @@
     {
       "path": "docs/flow_cytometry_model_bridge_spec.md",
       "bytes": 21383,
-      "sha256": "88098958c8d808b0d6b738b47ae0f11b77211e62e017fded0c7750e0e2659cd1"
+      "sha256": "ede4cccf8c66769ea0de9e4c7822e2c476c3576bc4ac8ac2e32c6ca9b773fa0f"
     },
     {
       "path": "presentations/Clay_Microbes_Metal_22slides_Flow_Cytometry_Addendum.pdf",
@@ -107,23 +107,23 @@
     },
     {
       "path": "presentations/Interface_Resolved_Emulsion_Dynamics_Exploratory.pdf",
-      "bytes": 144265,
-      "sha256": "6aeea2b6d0c9c0967556fff3122585bdc3215fe7f59efec6eb782f714ff5034f"
+      "bytes": 143922,
+      "sha256": "f8d97a53f3405ffe0190b3e4175e29a9e71a5ab521404db14f37fea2dab25800"
     },
     {
       "path": "presentations/Interface_Resolved_Emulsion_Dynamics_Exploratory.pptx",
-      "bytes": 215634,
-      "sha256": "7c960c0805b8c8b196713a8f7951120cc1cba97e1beeb27d8bb06836ff922891"
+      "bytes": 214021,
+      "sha256": "32a320b60bfc0437714c66203e56d59026598da5d9b2a8c83f9f3ba329f00b41"
     },
     {
       "path": "presentations/Single_Cell_Flow_Cytometry_Model_Bridge_Exploratory.pdf",
-      "bytes": 645474,
-      "sha256": "ef2b7595571aab84678d9dfb8d31645b7c7dd7b1f15a2fac19e54c4a489cff63"
+      "bytes": 645314,
+      "sha256": "bf4c5a61a56e52375ca145761f5c51bcae55b35150ed2d1e7469e0544924a756"
     },
     {
       "path": "presentations/Single_Cell_Flow_Cytometry_Model_Bridge_Exploratory.pptx",
-      "bytes": 258173,
-      "sha256": "7a90d4f4b6a003ced8c487008484fb5096b9e0b7d1e3158e80946fe21a60568f"
+      "bytes": 258785,
+      "sha256": "15d6cbad799ee5532b10c9d0408f832fc779d2d96e468378530a165583c471d6"
     },
     {
       "path": "previews/Appendix_Slide_21_Flow_Cytometry.png",
@@ -157,13 +157,13 @@
     },
     {
       "path": "previews/Ghosh_Bridge_Slide_5.png",
-      "bytes": 219759,
-      "sha256": "873704178c7f236e25170ee0481017fdb8db62b4fdf22ccd06c5b3c2c262fec3"
+      "bytes": 219814,
+      "sha256": "f116b67a155249fb24a7b211c4b385bc7e71a4886b4f786d17e6eaf0313d8b0f"
     },
     {
       "path": "previews/Jack_Emulsion_Interface_Slide_1.png",
-      "bytes": 193570,
-      "sha256": "285bc87086a10d858a8a43060bcb504aa30fdaf8b8719e4dfcb30e6e13cc26ec"
+      "bytes": 192229,
+      "sha256": "3de27b9ecbfee480b2c765f6cb2f2a5ed2d42769cf04e64a12a5b8117c6a8676"
     },
     {
       "path": "source/Original_20_slide_Clay_Microbes_Metal_Deck.pptx",
@@ -172,8 +172,8 @@
     },
     {
       "path": "workbench/microfluidic_cytometry_workbench.html",
-      "bytes": 80589,
-      "sha256": "b8ee6490885948d6791f681cd3f4568b54b15f66aa9d66a65bf6cfe74c675ed0"
+      "bytes": 100290,
+      "sha256": "a393c5689c60261dec397384d698feacc15e5b9414e4de5c1ed1afd818936671"
     }
   ]
 }

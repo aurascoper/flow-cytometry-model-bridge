@@ -107,9 +107,9 @@ def render_ghosh_slide_5_png(out_path: Path):
     ax.add_patch(w_r2)
     ax.add_patch(w_r1)
     ax.add_patch(w_r0)
-    ax.text(cx - 0.14, cy - 0.10, "R0", fontsize=10.5, fontweight="bold", color="#273238")
-    ax.text(cx + 0.36, cy - 0.12, "R1", fontsize=10.5, fontweight="bold", color="#1e1b4b")
-    ax.text(cx + 0.70, cy - 0.12, "R2", fontsize=10.5, fontweight="bold", color="#881337")
+    ax.text(cx - 0.24, cy + 0.14, "R0", fontsize=10.5, fontweight="bold", color="#273238")
+    ax.text(cx + 0.35, cy + 0.22, "R1", fontsize=10.5, fontweight="bold", color="#1e1b4b")
+    ax.text(cx + 0.69, cy + 0.22, "R2", fontsize=10.5, fontweight="bold", color="#881337")
 
     # Right Card: Microfluidic Coupling & Single-Cell Classification View
     right_card = FancyBboxPatch(
@@ -137,23 +137,23 @@ def render_ghosh_slide_5_png(out_path: Path):
 
     # Embedded Microfluidic Constriction Diagram inside Right Card
     ch_box = FancyBboxPatch(
-        (10.22, 3.30), 2.08, 1.65,
+        (10.22, 3.22), 2.08, 1.88,
         boxstyle="round,pad=0.02,rounding_size=0.08",
         facecolor="#ffffff", edgecolor="#3C6D65", linewidth=1.2
     )
     ax.add_patch(ch_box)
     # Constriction walls
-    top_wall = Polygon([[10.28, 3.42], [10.88, 3.42], [11.06, 3.84], [11.46, 3.84], [11.64, 3.42], [12.24, 3.42]],
+    top_wall = Polygon([[10.28, 3.36], [10.88, 3.36], [11.06, 3.76], [11.46, 3.76], [11.64, 3.36], [12.24, 3.36]],
                        closed=False, fill=False, edgecolor="#273238", lw=1.8)
-    bot_wall = Polygon([[10.28, 4.80], [10.88, 4.80], [11.06, 4.38], [11.46, 4.38], [11.64, 4.80], [12.24, 4.80]],
+    bot_wall = Polygon([[10.28, 4.62], [10.88, 4.62], [11.06, 4.22], [11.46, 4.22], [11.64, 4.62], [12.24, 4.62]],
                        closed=False, fill=False, edgecolor="#273238", lw=1.8)
     ax.add_patch(top_wall)
     ax.add_patch(bot_wall)
     # Cells in channel
-    ax.add_patch(Ellipse((10.58, 4.06), 0.22, 0.20, facecolor="#16a34a", edgecolor="#ffffff", lw=1))
-    ax.add_patch(Ellipse((11.26, 4.11), 0.32, 0.13, facecolor="#16a34a", edgecolor="#ffffff", lw=1))
-    ax.add_patch(Ellipse((11.95, 4.22), 0.22, 0.20, facecolor="#2563eb", edgecolor="#ffffff", lw=1))
-    ax.text(11.26, 4.68, "dt_transit & Gate MLE", fontsize=9.2, ha="center", color="#3C6D65", fontweight="bold")
+    ax.add_patch(Ellipse((10.58, 3.96), 0.22, 0.20, facecolor="#16a34a", edgecolor="#ffffff", lw=1))
+    ax.add_patch(Ellipse((11.26, 3.99), 0.32, 0.13, facecolor="#16a34a", edgecolor="#ffffff", lw=1))
+    ax.add_patch(Ellipse((11.95, 4.08), 0.22, 0.20, facecolor="#2563eb", edgecolor="#ffffff", lw=1))
+    ax.text(11.26, 4.92, "dt_transit & Gate MLE", fontsize=9.2, ha="center", color="#3C6D65", fontweight="bold")
 
     # Bottom Epistemic Boundary Banner
     banner = FancyBboxPatch(
@@ -231,13 +231,13 @@ def render_jack_slide_1_png(out_path: Path):
     )
 
     # Deformed Droplet Sequence Diagram inside Left Card
-    for idx, (tx, t_lbl, b_scale) in enumerate([(4.65, "t/tau=2", 0.55), (5.35, "t/tau=8", 0.34), (6.05, "t/tau=15", 0.18)]):
+    for idx, (tx, t_lbl, b_scale) in enumerate([(4.42, "t/tau=2", 0.50), (5.08, "t/tau=8", 0.32), (5.72, "t/tau=15", 0.17)]):
         ell_outer = Ellipse(
-            (tx, 4.15), width=b_scale, height=1.35, angle=14 * (idx + 1),
+            (tx, 4.12), width=b_scale, height=1.22, angle=13 * (idx + 1),
             facecolor="#7f1d1d", alpha=0.82, edgecolor="#f87171", lw=1.4
         )
         ax.add_patch(ell_outer)
-        ax.text(tx, 5.05, t_lbl, fontsize=9.0, ha="center", color="#273238", fontweight="bold")
+        ax.text(tx, 5.04, t_lbl, fontsize=9.0, ha="center", color="#273238", fontweight="bold")
 
     # Right Card: Twin-Vortex Velocity & Pressure Field P/Pa
     right_card = FancyBboxPatch(
@@ -265,15 +265,15 @@ def render_jack_slide_1_png(out_path: Path):
 
     # Embedded Double-Emulsion Vortex/Pressure Schematic inside Right Card
     p_box = FancyBboxPatch(
-        (10.22, 3.30), 2.08, 1.65,
+        (10.22, 3.22), 2.08, 1.88,
         boxstyle="round,pad=0.02,rounding_size=0.08",
         facecolor="#22c55e", alpha=0.28, edgecolor="#4A779D", linewidth=1.2
     )
     ax.add_patch(p_box)
-    ax.add_patch(Ellipse((11.26, 4.10), 1.55, 0.78, angle=-18, facecolor="#4ade80", alpha=0.45, edgecolor="#dc2626", lw=2.0))
-    ax.add_patch(Ellipse((11.26, 4.10), 0.68, 0.58, angle=-10, facecolor="#ef4444", alpha=0.85, edgecolor="#1d4ed8", lw=1.8))
-    ax.text(11.26, 4.10, "P/Pa", fontsize=9.5, ha="center", va="center", color="#ffffff", fontweight="bold")
-    ax.text(11.26, 4.74, "Twin Vortex + Core Pressure", fontsize=8.8, ha="center", color="#273238", fontweight="bold")
+    ax.add_patch(Ellipse((11.26, 4.02), 1.55, 0.78, angle=-18, facecolor="#4ade80", alpha=0.45, edgecolor="#dc2626", lw=2.0))
+    ax.add_patch(Ellipse((11.26, 4.02), 0.68, 0.58, angle=-10, facecolor="#ef4444", alpha=0.85, edgecolor="#1d4ed8", lw=1.8))
+    ax.text(11.26, 4.02, "P/Pa", fontsize=9.5, ha="center", va="center", color="#ffffff", fontweight="bold")
+    ax.text(11.26, 4.92, "Twin Vortex + Core Pressure", fontsize=8.8, ha="center", color="#273238", fontweight="bold")
 
     # Bottom Boundary Banner
     banner = FancyBboxPatch(

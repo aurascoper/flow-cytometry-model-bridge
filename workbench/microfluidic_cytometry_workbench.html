@@ -442,6 +442,10 @@
       Load .FCS Binary
       <input type="file" id="fcs-file-input" accept=".fcs" style="display:none;" onchange="handleFCSUpload(event)">
     </label>
+    <label class="top-btn" style="cursor:pointer;">
+      Load Sensor .CSV
+      <input type="file" id="csv-file-input" accept=".csv" style="display:none;" onchange="handleSensorCSVUpload(event)">
+    </label>
     <button class="top-btn" onclick="exportGatesAndAnalysisJSON()">Export Gates &amp; Audit JSON</button>
     <button class="top-btn" onclick="exportClassifiedCSV()">Export Classified CSV</button>
   </div>
@@ -808,8 +812,8 @@
         <span class="epistemic-tag tag-observed">SHA-256</span>
       </div>
       <div style="font-size:10.5px;color:var(--muted);word-break:break-all;margin-bottom:6px;" id="provenance-hash-box">
-        File: sample_nanobio_chip01.fcs<br>
-        SHA256: 7c4b0e91a8f2...
+        File: sample_nanobio_chip01.fcs (FCS3.1)<br>
+        SHA256: 110a48daaa3a75d5cc9af000...
       </div>
       <table class="mini-table" id="transit-summary-table">
         <thead>
@@ -880,7 +884,7 @@ let state = {
   targetTask: "cell_stress_damage",
   splitBy: "chip_id",
   fcsFileName: "sample_nanobio_chip01.fcs",
-  fcsSha256: "f40987d52e903a1689a319c143f2685b832a840b5571284e40f2c1f765a41e82",
+  fcsSha256: "110a48daaa3a75d5cc9af000f316489a5b588ddbe859e8d043b77369343361bc",
   rawEvents: [],
   compEvents: [],
   panels: [
@@ -892,6 +896,9 @@ let state = {
   gates: [],
   gateSummaries: {},
   predictions: [],
+  polyDraftVertices: [],
+  polyDraftCursor: null,
+  polyDraftCanvasId: null,
   physicsDomain: "ghosh",
   physicsTime: 5.0,
   physicsPlaying: false,
@@ -1115,9 +1122,9 @@ function setActiveGateFilter(gid) {
 // SINGLE-CELL CLASSIFIER & OBSERVATION MODEL BRIDGE
 // ============================================================================
 function runSingleCellClassifier() {
-  state.targetTask = document.getElementById("sel-clf-target").value;
-  state.splitBy = document.getElementById("sel-split-group").value;
-  const classes = TARGET_CLASSES[state.targetTask];
+  state.targetTask = document.getElementById("sel-clf-target").value || "cell_stress_damage";
+  state.splitBy = document.getElementById("sel-split-group").value || "chip_id";
+  const classes = TARGET_CLASSES[state.targetTask] || TARGET_CLASSES.cell_stress_damage;
   const ds = getActiveDataset();
   const confTh = state.confidenceThreshold;
 
@@ -1126,9 +1133,9 @@ function runSingleCellClassifier() {
 
   // Compute calibrated class probabilities for each event
   state.predictions = ds.map((ev, idx) => {
-    const sybrLog = txVal("logicle", ev["FL1-SYBR-A"]);
-    const piLog   = txVal("logicle", ev["FL2-PI-A"]);
-    const cy5Log  = txVal("logicle", ev["FL3-Cy5-A"]);
+    const sybrLog = txVal("log10", ev["FL1-SYBR-A"]);
+    const piLog   = txVal("log10", ev["FL2-PI-A"]);
+    const cy5Log  = txVal("log10", ev["FL3-Cy5-A"]);
     const dt      = ev["TRANSIT-MS"];
     const def     = ev["DEFORMABILITY"];
 
@@ -1176,14 +1183,40 @@ function runSingleCellClassifier() {
     }
   }
 
-  const n = state.predictions.length;
+  const n = Math.max(1, state.predictions.length);
   const accAccepted = accCnt > 0 ? (100 * correctAcc / accCnt) : (100 * correctAll / n);
   const brier = brierSum / n;
 
+  // Exact per-class Precision, Recall, F1 and unweighted Macro-F1
+  let f1Sum = 0.0;
+  for (let c = 0; c < 3; c++) {
+    const tp = cm[c][c];
+    const predPos = cm[0][c] + cm[1][c] + cm[2][c];
+    const truePos = cm[c][0] + cm[c][1] + cm[c][2];
+    const prec = predPos > 0 ? tp / predPos : 0.0;
+    const rec  = truePos > 0 ? tp / truePos : 0.0;
+    const f1   = (prec + rec) > 0 ? (2.0 * prec * rec) / (prec + rec) : 0.0;
+    f1Sum += f1;
+  }
+  const macroF1 = f1Sum / 3.0;
+
+  // Exact 10-bin Expected Calibration Error (ECE) matching CellClassifier.jl
+  let ece = 0.0;
+  for (let b = 1; b <= 10; b++) {
+    const lo = (b - 1) / 10.0;
+    const hi = b / 10.0;
+    const binPreds = state.predictions.filter(p => b === 1 ? (p.confidence >= lo && p.confidence <= hi) : (p.confidence > lo && p.confidence <= hi));
+    if (binPreds.length > 0) {
+      const binAcc  = binPreds.reduce((acc, p) => acc + (p.truePop === p.predIdx ? 1.0 : 0.0), 0.0) / binPreds.length;
+      const binConf = binPreds.reduce((acc, p) => acc + p.confidence, 0.0) / binPreds.length;
+      ece += (binPreds.length / n) * Math.abs(binAcc - binConf);
+    }
+  }
+
   document.getElementById("val-acc-accepted").textContent = `${accAccepted.toFixed(1)}%`;
   document.getElementById("val-deferred-cnt").textContent = `${defCnt} (${(100 * defCnt / n).toFixed(1)}%)`;
-  document.getElementById("val-macro-f1").textContent = (correctAll / n).toFixed(3);
-  document.getElementById("val-brier-ece").textContent = `${brier.toFixed(3)} / ${(brier * 0.58).toFixed(3)}`;
+  document.getElementById("val-macro-f1").textContent = macroF1.toFixed(3);
+  document.getElementById("val-brier-ece").textContent = `${brier.toFixed(3)} / ${ece.toFixed(3)}`;
 
   const shortNames = classes.map(c => c.split("_")[0]);
   let tblHtml = `<thead><tr><th>True \\ Pred</th><th>${shortNames[0]}</th><th>${shortNames[1]}</th><th>${shortNames[2]}</th></tr></thead><tbody>`;
@@ -1203,8 +1236,14 @@ function onConfidenceThresholdChange(val) {
   runSingleCellClassifier();
 }
 
+function logFactorial(n) {
+  let s = 0.0;
+  for (let k = 2; k <= n; k++) s += Math.log(k);
+  return s;
+}
+
 function updateObservationBridge() {
-  const conv = document.getElementById("sel-vol-conv").value;
+  const conv = document.getElementById("sel-vol-conv").value || "direct_concentration";
   const counts = [0, 0, 0];
   const transitAgg = [
     { cnt: 0, dt: 0, blk: 0, def: 0 },
@@ -1239,9 +1278,33 @@ function updateObservationBridge() {
   const ciLo = cMle * Math.exp(-1.96 * relSd);
   const ciHi = cMle * Math.exp(1.96 * relSd);
 
+  // Exact Poisson-Multinomial joint log-likelihood matching FlowCytometryObservationModel.jl
+  let jointLL = 0.0;
+  if (nObs > 0) {
+    const lam = cMle * detEff * vEff * recov * (beadEvents / beadsAdded);
+    const llCount = nObs * Math.log(lam) - lam - logFactorial(nObs);
+    const f = [counts[0] / nObs, counts[1] / nObs, counts[2] / nObs];
+    const Cmat = [
+      [0.94, 0.04, 0.01],
+      [0.05, 0.91, 0.06],
+      [0.01, 0.05, 0.93]
+    ];
+    const pGate = [
+      Cmat[0][0] * f[0] + Cmat[0][1] * f[1] + Cmat[0][2] * f[2],
+      Cmat[1][0] * f[0] + Cmat[1][1] * f[1] + Cmat[1][2] * f[2],
+      Cmat[2][0] * f[0] + Cmat[2][1] * f[1] + Cmat[2][2] * f[2]
+    ];
+    let llGate = logFactorial(nObs);
+    for (let g = 0; g < 3; g++) {
+      llGate -= logFactorial(counts[g]);
+      if (counts[g] > 0) llGate += counts[g] * Math.log(Math.max(1e-15, pGate[g]));
+    }
+    jointLL = llCount + llGate;
+  }
+
   document.getElementById("val-mle-conc").textContent = cMle.toExponential(2);
   document.getElementById("val-mle-ci").textContent = `[${ciLo.toExponential(2)}, ${ciHi.toExponential(2)}]`;
-  document.getElementById("val-joint-ll").textContent = (-9.4 - 0.008 * nObs).toFixed(2);
+  document.getElementById("val-joint-ll").textContent = jointLL.toFixed(2);
 
   const classes = TARGET_CLASSES[state.targetTask];
   let tbody = "";
@@ -1348,56 +1411,84 @@ function drawCytometryPlot(canvasId, panelSpec, panelIndex) {
   ctx.save();
   ctx.translate(13, padT + plotH / 2);
   ctx.rotate(-Math.PI / 2);
-  ctx.fillText(`${panelSpec.yCh} (${panelSpec.yScale})`, 0, 0);
+  ctx.fillText(panelSpec.yCh === "HISTOGRAM" ? "Event Count (1D Histogram)" : `${panelSpec.yCh} (${panelSpec.yScale})`, 0, 0);
   ctx.restore();
 
   const ds = getActiveDataset();
   const activeMask = (state.gateSummaries[state.activeGateFilter] || state.gateSummaries.root).mask;
   const colorMode = document.getElementById("plot-color-mode").value;
 
-  // Compute 2D histogram bin counts for Floreada-style pseudocolor density
-  const nBins = 28;
-  const bins = Array.from({ length: nBins }, () => new Int32Array(nBins));
-  let maxBin = 1;
-  const pts = [];
-
-  for (let i = 0; i < ds.length; i++) {
-    if (!activeMask[i]) continue;
-    const vx = txVal(panelSpec.xScale, ds[i][panelSpec.xCh]);
-    const vy = txVal(panelSpec.yScale, ds[i][panelSpec.yCh]);
-    const px = toX(vx), py = toY(vy);
-    const bx = Math.min(nBins - 1, Math.max(0, Math.floor(((vx - xMin) / (xMax - xMin)) * nBins)));
-    const by = Math.min(nBins - 1, Math.max(0, Math.floor(((vy - yMin) / (yMax - yMin)) * nBins)));
-    bins[bx][by]++;
-    if (bins[bx][by] > maxBin) maxBin = bins[bx][by];
-    pts.push({ i, px, py, bx, by });
-  }
-
-  for (const pt of pts) {
-    if (pt.px < padL || pt.px > padL + plotW || pt.py < padT || pt.py > padT + plotH) continue;
-    if (colorMode === "classifier" || panelIndex === 3) {
-      const pr = state.predictions[pt.i];
-      if (pr && pr.deferred) {
-        ctx.fillStyle = "#d97706"; // Amber for :defer_for_review
-      } else if (pr && pr.predIdx === 0) {
-        ctx.fillStyle = "#16a34a"; // Intact / Rod / High Uptake
-      } else if (pr && pr.predIdx === 1) {
-        ctx.fillStyle = "#2563eb"; // Compromised / Coccus / Low Uptake
-      } else {
-        ctx.fillStyle = "#dc2626"; // Dead / Debris / Occlusion
-      }
-    } else {
-      const dNorm = bins[pt.bx][pt.by] / maxBin;
-      ctx.fillStyle = floreadaDensityColor(dNorm);
+  if (panelSpec.yCh === "HISTOGRAM") {
+    // 1D Channel Histogram Mode
+    const nHistBins = 32;
+    const histCounts = new Int32Array(nHistBins);
+    let maxCount = 1;
+    for (let i = 0; i < ds.length; i++) {
+      if (!activeMask[i]) continue;
+      const vx = txVal(panelSpec.xScale, ds[i][panelSpec.xCh]);
+      const bx = Math.min(nHistBins - 1, Math.max(0, Math.floor(((vx - xMin) / (xMax - xMin)) * nHistBins)));
+      histCounts[bx]++;
+      if (histCounts[bx] > maxCount) maxCount = histCounts[bx];
     }
-    ctx.beginPath();
-    ctx.arc(pt.px, pt.py, 2.3, 0, 2 * Math.PI);
-    ctx.fill();
+    const barW = plotW / nHistBins;
+    for (let b = 0; b < nHistBins; b++) {
+      const cnt = histCounts[b];
+      if (cnt === 0) continue;
+      const bh = (cnt / maxCount) * (plotH - 8);
+      const bx = padL + b * barW;
+      const by = padT + plotH - bh;
+      ctx.fillStyle = "rgba(29, 78, 216, 0.38)";
+      ctx.strokeStyle = "#1d4ed8";
+      ctx.lineWidth = 1.1;
+      ctx.fillRect(bx + 1, by, Math.max(1, barW - 2), bh);
+      ctx.strokeRect(bx + 1, by, Math.max(1, barW - 2), bh);
+    }
+  } else {
+    // 2D Scatter / Floreada Pseudocolor Density Mode
+    const nBins = 28;
+    const bins = Array.from({ length: nBins }, () => new Int32Array(nBins));
+    let maxBin = 1;
+    const pts = [];
+
+    for (let i = 0; i < ds.length; i++) {
+      if (!activeMask[i]) continue;
+      const vx = txVal(panelSpec.xScale, ds[i][panelSpec.xCh]);
+      const vy = txVal(panelSpec.yScale, ds[i][panelSpec.yCh]);
+      const px = toX(vx), py = toY(vy);
+      const bx = Math.min(nBins - 1, Math.max(0, Math.floor(((vx - xMin) / (xMax - xMin)) * nBins)));
+      const by = Math.min(nBins - 1, Math.max(0, Math.floor(((vy - yMin) / (yMax - yMin)) * nBins)));
+      bins[bx][by]++;
+      if (bins[bx][by] > maxBin) maxBin = bins[bx][by];
+      pts.push({ i, px, py, bx, by });
+    }
+
+    for (const pt of pts) {
+      if (pt.px < padL || pt.px > padL + plotW || pt.py < padT || pt.py > padT + plotH) continue;
+      if (colorMode === "classifier" || panelIndex === 3) {
+        const pr = state.predictions[pt.i];
+        if (pr && pr.deferred) {
+          ctx.fillStyle = "#d97706"; // Amber for :defer_for_review
+        } else if (pr && pr.predIdx === 0) {
+          ctx.fillStyle = "#16a34a"; // Intact / Rod / High Uptake
+        } else if (pr && pr.predIdx === 1) {
+          ctx.fillStyle = "#2563eb"; // Compromised / Coccus / Low Uptake
+        } else {
+          ctx.fillStyle = "#dc2626"; // Dead / Debris / Occlusion
+        }
+      } else {
+        const dNorm = bins[pt.bx][pt.by] / maxBin;
+        ctx.fillStyle = floreadaDensityColor(dNorm);
+      }
+      ctx.beginPath();
+      ctx.arc(pt.px, pt.py, 2.3, 0, 2 * Math.PI);
+      ctx.fill();
+    }
   }
 
-  // Render Gates Matching This Channel Pair
+  // Render Gates Matching This Channel Pair (or 1D RangeGate on xCh)
   for (const g of state.gates) {
-    if (g.xCh !== panelSpec.xCh || g.yCh !== panelSpec.yCh) continue;
+    if (g.xCh !== panelSpec.xCh) continue;
+    if (g.type !== "Range" && g.yCh !== panelSpec.yCh) continue;
     const gs = state.gateSummaries[g.id];
     ctx.strokeStyle = "#0f172a";
     ctx.lineWidth = 1.8;
@@ -1409,6 +1500,19 @@ function drawCytometryPlot(canvasId, panelSpec, panelIndex) {
       ctx.strokeRect(Math.min(rx0, rx1), Math.min(ry0, ry1), Math.abs(rx1 - rx0), Math.abs(ry1 - ry0));
       labelX = (rx0 + rx1) / 2;
       labelY = (ry0 + ry1) / 2;
+    } else if (g.type === "Range") {
+      const rx0 = Math.max(padL, Math.min(padL + plotW, toX(Math.min(g.x0, g.x1))));
+      const rx1 = Math.max(padL, Math.min(padL + plotW, toX(Math.max(g.x0, g.x1))));
+      ctx.fillStyle = "rgba(15, 118, 110, 0.10)";
+      ctx.fillRect(rx0, padT, rx1 - rx0, plotH);
+      ctx.strokeStyle = "#0f766e";
+      ctx.beginPath();
+      ctx.moveTo(rx0, padT + 8); ctx.lineTo(rx0, padT + plotH - 8);
+      ctx.moveTo(rx1, padT + 8); ctx.lineTo(rx1, padT + plotH - 8);
+      ctx.moveTo(rx0, padT + 26); ctx.lineTo(rx1, padT + 26);
+      ctx.stroke();
+      labelX = (rx0 + rx1) / 2;
+      labelY = padT + 26;
     } else if (g.type === "Ellipse") {
       ctx.beginPath();
       for (let k = 0; k <= 64; k++) {
@@ -1456,6 +1560,30 @@ function drawCytometryPlot(canvasId, panelSpec, panelIndex) {
     ctx.fillStyle = "#0f172a";
     ctx.textAlign = "center";
     ctx.fillText(badgeTxt, labelX, labelY + 3);
+  }
+
+  // Render live interactive PolygonGate vertex draft if active on this canvas
+  if (state.polyDraftCanvasId === canvasId && state.polyDraftVertices.length > 0) {
+    ctx.strokeStyle = "#0284c7";
+    ctx.lineWidth = 1.8;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    state.polyDraftVertices.forEach((v, idx) => {
+      const px = toX(v[0]), py = toY(v[1]);
+      if (idx === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    if (state.polyDraftCursor) {
+      ctx.lineTo(state.polyDraftCursor.px, state.polyDraftCursor.py);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    for (const v of state.polyDraftVertices) {
+      const px = toX(v[0]), py = toY(v[1]);
+      ctx.fillStyle = "#0284c7";
+      ctx.beginPath();
+      ctx.arc(px, py, 3.5, 0, 2 * Math.PI);
+      ctx.fill();
+    }
   }
 }
 
@@ -1519,68 +1647,100 @@ function drawPhysics3DCanvas(mode, t, showCutaway) {
     // Radii R0 = 0.38, R1 = 0.72, R2 = 1.00 + outer wireframe release front
     const relFrac = 1.0 - Math.exp(-0.14 * t);
     const strata = [
-      { r: 1.00, col: "rgba(225, 29, 72, 0.38)", stroke: "#fb7185", label: "R2 (Outer Shell Omega_3)" },
-      { r: 0.72, col: "rgba(99, 102, 241, 0.58)", stroke: "#818cf8", label: "R1 (Mid Shell Omega_2)" },
-      { r: 0.38, col: "rgba(250, 204, 21, 0.92)", stroke: "#fde047", label: "R0 (Core Omega_1)" }
+      { r: 1.00, col: "rgba(225, 29, 72, 0.36)", stroke: "#fb7185", label: "R2" },
+      { r: 0.72, col: "rgba(99, 102, 241, 0.56)", stroke: "#818cf8", label: "R1" },
+      { r: 0.38, col: "rgba(250, 204, 21, 0.92)", stroke: "#fde047", label: "R0" }
     ];
+
+    // Draw concentric spherical shells R2, R1, R0 with 3D octant cutaway planes rotated by (rotYaw, rotPitch)
+    for (const s of strata) {
+      const rad = s.r * scale;
+      ctx.fillStyle = s.col;
+      ctx.strokeStyle = s.stroke;
+      ctx.lineWidth = 1.8;
+
+      if (!showCutaway) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, rad, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        // Draw 3D octant-cutaway spherical shell and the 3 orthogonal cut-plane sectors (XY, XZ, YZ)
+        const pOrigin = project3D(0, 0, 0, cx, cy, scale, state.rotYaw, state.rotPitch);
+        // Back hemisphere silhouette
+        ctx.beginPath();
+        ctx.arc(cx, cy, rad, 0.05 * Math.PI, 1.55 * Math.PI, false);
+        ctx.lineTo(pOrigin.px, pOrigin.py);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // Draw the 3 orthogonal 3D octant cut faces in (x >= 0, y >= 0, z >= 0)
+        const planes = [
+          th => [s.r * Math.cos(th), s.r * Math.sin(th), 0], // XY plane (z=0)
+          th => [s.r * Math.cos(th), 0, s.r * Math.sin(th)], // XZ plane (y=0)
+          th => [0, s.r * Math.cos(th), s.r * Math.sin(th)]  // YZ plane (x=0)
+        ];
+        for (const fn of planes) {
+          ctx.beginPath();
+          ctx.moveTo(pOrigin.px, pOrigin.py);
+          for (let k = 0; k <= 24; k++) {
+            const th = (k / 24) * (Math.PI / 2);
+            const [vx, vy, vz] = fn(th);
+            const pt = project3D(vx, vy, vz, cx, cy, scale, state.rotYaw, state.rotPitch);
+            ctx.lineTo(pt.px, pt.py);
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
+    }
 
     // Draw outer 3D wireframe isosurface (expanding reaction-diffusion release front)
     const rIso = 1.04 + 0.12 * relFrac;
-    ctx.strokeStyle = "rgba(56, 189, 248, 0.45)";
-    ctx.lineWidth = 1.0;
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.55)";
+    ctx.lineWidth = 1.05;
     for (let lat = -60; lat <= 60; lat += 30) {
       const phi = (lat * Math.PI) / 180;
       ctx.beginPath();
-      for (let lon = 0; lon <= 360; lon += 10) {
+      let started = false;
+      for (let lon = 0; lon <= 360; lon += 8) {
         const th = (lon * Math.PI) / 180;
         const x = rIso * Math.cos(phi) * Math.cos(th);
         const y = rIso * Math.cos(phi) * Math.sin(th);
         const z = rIso * Math.sin(phi);
-        if (showCutaway && x > 0 && y > 0 && z > 0) continue;
+        if (showCutaway && x > 0 && y > 0 && z > 0) { started = false; continue; }
         const p = project3D(x, y, z, cx, cy, scale, state.rotYaw, state.rotPitch);
-        if (lon === 0) ctx.moveTo(p.px, p.py); else ctx.lineTo(p.px, p.py);
+        if (!started) { ctx.moveTo(p.px, p.py); started = true; } else { ctx.lineTo(p.px, p.py); }
       }
       ctx.stroke();
     }
     for (let lon = 0; lon < 360; lon += 30) {
       const th = (lon * Math.PI) / 180;
       ctx.beginPath();
-      for (let lat = -90; lat <= 90; lat += 10) {
+      let started = false;
+      for (let lat = -90; lat <= 90; lat += 8) {
         const phi = (lat * Math.PI) / 180;
         const x = rIso * Math.cos(phi) * Math.cos(th);
         const y = rIso * Math.cos(phi) * Math.sin(th);
         const z = rIso * Math.sin(phi);
-        if (showCutaway && x > 0 && y > 0 && z > 0) continue;
+        if (showCutaway && x > 0 && y > 0 && z > 0) { started = false; continue; }
         const p = project3D(x, y, z, cx, cy, scale, state.rotYaw, state.rotPitch);
-        if (lat === -90) ctx.moveTo(p.px, p.py); else ctx.lineTo(p.px, p.py);
+        if (!started) { ctx.moveTo(p.px, p.py); started = true; } else { ctx.lineTo(p.px, p.py); }
       }
       ctx.stroke();
     }
 
-    // Draw concentric spherical shells R2, R1, R0 with octant cutawayplanes
-    for (const s of strata) {
-      const rad = s.r * scale;
-      ctx.fillStyle = s.col;
-      ctx.strokeStyle = s.stroke;
-      ctx.lineWidth = 2.0;
-      ctx.beginPath();
-      if (showCutaway) {
-        ctx.arc(cx, cy, rad, 0, 1.5 * Math.PI, false);
-        ctx.lineTo(cx, cy);
-        ctx.closePath();
-      } else {
-        ctx.arc(cx, cy, rad, 0, 2 * Math.PI);
-      }
-      ctx.fill();
-      ctx.stroke();
-    }
-
-    // Labels R0, R1, R2 matching reference octant cutaway diagram
+    // 3D-projected Labels R0, R1, R2 along the cutaway axis
     ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 13px -apple-system, sans-serif";
-    ctx.fillText("R0", cx + scale * 0.16, cy - scale * 0.12);
-    ctx.fillText("R1", cx + scale * 0.48, cy - scale * 0.12);
-    ctx.fillText("R2", cx + scale * 0.78, cy - scale * 0.12);
+    ctx.font = "bold 12.5px -apple-system, sans-serif";
+    const pR0 = project3D(0.22, 0.0, 0.14, cx, cy, scale, state.rotYaw, state.rotPitch);
+    const pR1 = project3D(0.55, 0.0, 0.18, cx, cy, scale, state.rotYaw, state.rotPitch);
+    const pR2 = project3D(0.86, 0.0, 0.22, cx, cy, scale, state.rotYaw, state.rotPitch);
+    ctx.fillText("R0", pR0.px, pR0.py);
+    ctx.fillText("R1", pR1.px, pR1.py);
+    ctx.fillText("R2", pR2.px, pR2.py);
 
     // Colorbar for u(x,y,z,t) in [0, 0.03]
     const cbX = W - 46, cbY = 30, cbH = H - 70;
@@ -1602,7 +1762,7 @@ function drawPhysics3DCanvas(mode, t, showCutaway) {
     ctx.fillStyle = "#94a3b8";
     ctx.font = "11px -apple-system, sans-serif";
     ctx.fillText(
-      `Simulated Concentration Shells (:predicted) | Release F_rel(t) = ${(100 * relFrac).toFixed(1)}%`,
+      `Simulated Concentration Shells (:predicted) | Release F_rel(t) = ${(100 * relFrac).toFixed(1)}% | Drag to rotate 3D`,
       14, H - 12
     );
   } else {
@@ -1612,7 +1772,8 @@ function drawPhysics3DCanvas(mode, t, showCutaway) {
     const L = Math.pow(ratioLB, 0.42);
     const B = Math.pow(ratioLB, -0.28);
     const neck = Math.max(0.18, 1.0 - 0.055 * Math.max(0, t - 5.0));
-    const tilt = 0.42 - 0.018 * t;
+    const tilt = (0.42 - 0.018 * t) + (state.rotYaw - 0.62) * 0.5;
+    const pitchScale = 0.65 + 0.35 * Math.cos(state.rotPitch - 0.38);
 
     // Draw 3D deformed droplet wireframe + surface shading
     ctx.save();
@@ -1628,7 +1789,7 @@ function drawPhysics3DCanvas(mode, t, showCutaway) {
       const th = (k / 120) * 2 * Math.PI;
       const pinch = 1.0 - (1.0 - neck) * Math.pow(Math.sin(th), 4);
       const rx = scale * 0.75 * L * Math.cos(th);
-      const ry = scale * 0.75 * B * Math.sin(th) * pinch;
+      const ry = scale * 0.75 * B * Math.sin(th) * pinch * pitchScale;
       if (k === 0) ctx.moveTo(rx, ry); else ctx.lineTo(rx, ry);
     }
     ctx.closePath();
@@ -1636,7 +1797,7 @@ function drawPhysics3DCanvas(mode, t, showCutaway) {
     ctx.stroke();
 
     // Wireframe latitude/longitude ribs over deformed droplet interface
-    ctx.strokeStyle = "rgba(254, 202, 202, 0.35)";
+    ctx.strokeStyle = "rgba(254, 202, 202, 0.38)";
     ctx.lineWidth = 1.0;
     for (const frac of [-0.6, -0.3, 0.0, 0.3, 0.6]) {
       ctx.beginPath();
@@ -1644,7 +1805,7 @@ function drawPhysics3DCanvas(mode, t, showCutaway) {
         const th = (k / 80) * Math.PI;
         const pinch = 1.0 - (1.0 - neck) * Math.pow(Math.sin(th), 4);
         const rx = scale * 0.75 * L * Math.cos(th);
-        const ry = scale * 0.75 * B * Math.sin(th) * pinch * frac;
+        const ry = scale * 0.75 * B * Math.sin(th) * pinch * frac * pitchScale;
         if (k === 0) ctx.moveTo(rx, ry); else ctx.lineTo(rx, ry);
       }
       ctx.stroke();
@@ -1896,6 +2057,20 @@ function attachInteractiveGateDrawing(canvasId, getPanelSpec) {
   const canvas = document.getElementById(canvasId);
   let dragStart = null;
 
+  const clientToData = (clientX, clientY) => {
+    const r = canvas.getBoundingClientRect();
+    const px = clientX - r.left, py = clientY - r.top;
+    const spec = getPanelSpec();
+    const padL = 48, padR = 16, padT = 14, padB = 34;
+    const plotW = r.width - padL - padR, plotH = r.height - padT - padB;
+    const [xMin, xMax] = getChannelBounds(spec.xCh, spec.xScale);
+    const isHist = (spec.yCh === "HISTOGRAM");
+    const [yMin, yMax] = isHist ? [0.0, 1.0] : getChannelBounds(spec.yCh, spec.yScale);
+    const vx = xMin + ((px - padL) / plotW) * (xMax - xMin);
+    const vy = yMin + ((padT + plotH - py) / plotH) * (yMax - yMin);
+    return { px, py, vx, vy, spec };
+  };
+
   canvas.addEventListener("mousedown", e => {
     const r = canvas.getBoundingClientRect();
     dragStart = { x: e.clientX - r.left, y: e.clientY - r.top };
@@ -1906,22 +2081,42 @@ function attachInteractiveGateDrawing(canvasId, getPanelSpec) {
     const r = canvas.getBoundingClientRect();
     const xEnd = e.clientX - r.left, yEnd = e.clientY - r.top;
     const dx = Math.abs(xEnd - dragStart.x), dy = Math.abs(yEnd - dragStart.y);
-    if (dx < 8 && dy < 8) { dragStart = null; return; }
+    const tool = state.activeGateTool;
 
     const spec = getPanelSpec();
     const padL = 48, padR = 16, padT = 14, padB = 34;
     const plotW = r.width - padL - padR, plotH = r.height - padT - padB;
     const [xMin, xMax] = getChannelBounds(spec.xCh, spec.xScale);
-    const [yMin, yMax] = getChannelBounds(spec.yCh, spec.yScale);
+    const isHist = (spec.yCh === "HISTOGRAM");
+    const [yMin, yMax] = isHist ? [0.0, 1.0] : getChannelBounds(spec.yCh, spec.yScale);
     const invX = px => xMin + ((px - padL) / plotW) * (xMax - xMin);
     const invY = py => yMin + ((padT + plotH - py) / plotH) * (yMax - yMin);
 
     const vx0 = invX(dragStart.x), vx1 = invX(xEnd);
     const vy0 = invY(dragStart.y), vy1 = invY(yEnd);
 
-    const tool = state.activeGateTool;
+    // Click-by-click polygon vertex drafting when tool === "Poly" and click without drag
+    if (dx < 8 && dy < 8) {
+      dragStart = null;
+      if (tool === "Poly" && !isHist) {
+        if (state.polyDraftCanvasId !== canvasId) {
+          state.polyDraftCanvasId = canvasId;
+          state.polyDraftVertices = [];
+        }
+        state.polyDraftVertices.push([vx1, vy1]);
+        renderAllViews();
+      }
+      return;
+    }
+
     const newId = `${tool}_${state.gates.length + 1}`;
-    if (tool === "Rect" || tool === "Range") {
+    if (tool === "Range" || isHist) {
+      state.gates.push({
+        id: newId, name: newId, type: "Range", parent: state.activeGateFilter,
+        xCh: spec.xCh, xScale: spec.xScale,
+        x0: Math.min(vx0, vx1), x1: Math.max(vx0, vx1)
+      });
+    } else if (tool === "Rect") {
       state.gates.push({
         id: newId, name: newId, type: "Rect", parent: state.activeGateFilter,
         xCh: spec.xCh, yCh: spec.yCh, xScale: spec.xScale, yScale: spec.yScale,
@@ -1951,15 +2146,64 @@ function attachInteractiveGateDrawing(canvasId, getPanelSpec) {
         xCh: spec.xCh, yCh: spec.yCh, xScale: spec.xScale, yScale: spec.yScale,
         vertices: [[cx - rx, cy - ry], [cx + rx, cy - 0.5 * ry], [cx + 0.7 * rx, cy + ry], [cx - 0.8 * rx, cy + 0.8 * ry]]
       });
+      state.polyDraftVertices = [];
     }
     dragStart = null;
     evaluateAllGates();
     renderAllViews();
   });
+
+  canvas.addEventListener("dblclick", e => {
+    if (state.activeGateTool === "Poly" && state.polyDraftCanvasId === canvasId && state.polyDraftVertices.length >= 3) {
+      const spec = getPanelSpec();
+      const newId = `Poly_${state.gates.length + 1}`;
+      state.gates.push({
+        id: newId, name: newId, type: "Poly", parent: state.activeGateFilter,
+        xCh: spec.xCh, yCh: spec.yCh, xScale: spec.xScale, yScale: spec.yScale,
+        vertices: state.polyDraftVertices.slice()
+      });
+      state.polyDraftVertices = [];
+      state.polyDraftCanvasId = null;
+      evaluateAllGates();
+      renderAllViews();
+    }
+  });
+}
+
+function attach3DRotation() {
+  const c3d = document.getElementById("canvas-phys-3d");
+  if (!c3d) return;
+  let dragging3D = false;
+  let lastX = 0, lastY = 0;
+  c3d.style.cursor = "grab";
+  c3d.addEventListener("mousedown", e => {
+    dragging3D = true;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    c3d.style.cursor = "grabbing";
+  });
+  window.addEventListener("mousemove", e => {
+    if (!dragging3D) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    state.rotYaw += dx * 0.012;
+    state.rotPitch = Math.max(-1.25, Math.min(1.25, state.rotPitch + dy * 0.012));
+    if (state.workspaceTab === "physics") renderPhysicsEngine();
+  });
+  window.addEventListener("mouseup", () => {
+    if (dragging3D) {
+      dragging3D = false;
+      c3d.style.cursor = "grab";
+    }
+  });
 }
 
 function selectGateTool(tool) {
   state.activeGateTool = tool;
+  state.polyDraftVertices = [];
+  state.polyDraftCanvasId = null;
   document.getElementById("active-tool-label").textContent = tool;
   ["Rect", "Poly", "Range", "Quad", "Ellipse"].forEach(t => {
     const el = document.getElementById(`tool-${t}`);
@@ -2027,8 +2271,9 @@ function renderAllViews() {
     }
   } else if (state.workspaceTab === "single") {
     const p = state.panels[state.selectedPanel];
+    const yDesc = p.yCh === "HISTOGRAM" ? "1D Histogram (Count)" : `${p.yCh} (${p.yScale})`;
     document.getElementById("single-plot-title").textContent =
-      `Single-Plot Interactive Gating View: ${p.yCh} (${p.yScale}) vs ${p.xCh} (${p.xScale})`;
+      `Single-Plot Interactive Gating View: ${yDesc} vs ${p.xCh} (${p.xScale})`;
     drawCytometryPlot("canvas-single", p, state.selectedPanel);
   } else if (state.workspaceTab === "physics") {
     renderPhysicsEngine();
@@ -2036,30 +2281,282 @@ function renderAllViews() {
 }
 
 // ============================================================================
-// CLIENT-SIDE BINARY .FCS (ISAC FCS 3.1) FILE PARSER & REPRODUCIBLE EXPORTERS
+// CLIENT-SIDE BINARY .FCS (ISAC FCS 3.1) & SENSOR .CSV FILE PARSERS
 // ============================================================================
-async function handleFCSUpload(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const buf = await file.arrayBuffer();
+function invertSquareMatrix(M) {
+  const n = M.length;
+  const A = M.map((row, i) => {
+    const ext = row.slice();
+    for (let j = 0; j < n; j++) ext.push(i === j ? 1.0 : 0.0);
+    return ext;
+  });
+  for (let col = 0; col < n; col++) {
+    let pivot = col;
+    for (let r = col + 1; r < n; r++) {
+      if (Math.abs(A[r][col]) > Math.abs(A[pivot][col])) pivot = r;
+    }
+    if (Math.abs(A[pivot][col]) < 1e-12) return null;
+    const tmp = A[col]; A[col] = A[pivot]; A[pivot] = tmp;
+    const div = A[col][col];
+    for (let j = 0; j < 2 * n; j++) A[col][j] /= div;
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue;
+      const factor = A[r][col];
+      for (let j = 0; j < 2 * n; j++) A[r][j] -= factor * A[col][j];
+    }
+  }
+  return A.map(row => row.slice(n, 2 * n));
+}
+
+function parseFCSTextSegment(textBytes) {
+  if (!textBytes || textBytes.length < 2) return {};
+  const delim = textBytes[0];
+  const dec = new TextDecoder("utf-8");
+  const tokens = [];
+  let i = 1;
+  const n = textBytes.length;
+  while (i < n) {
+    const chunk = [];
+    while (i < n) {
+      if (textBytes[i] === delim) {
+        if (i + 1 < n && textBytes[i + 1] === delim) {
+          chunk.push(delim);
+          i += 2;
+        } else {
+          i += 1;
+          break;
+        }
+      } else {
+        chunk.push(textBytes[i]);
+        i += 1;
+      }
+    }
+    tokens.push(dec.decode(new Uint8Array(chunk)));
+  }
+  const kw = {};
+  for (let k = 0; k + 1 < tokens.length; k += 2) {
+    const key = tokens[k].trim().toUpperCase();
+    if (key.length > 0) kw[key] = tokens[k + 1];
+  }
+  return kw;
+}
+
+async function parseFCS31Buffer(buf, fileName) {
   const bytes = new Uint8Array(buf);
   const dec = new TextDecoder("ascii");
   const ver = dec.decode(bytes.slice(0, 6)).trim();
   const textStart = parseInt(dec.decode(bytes.slice(10, 18)).trim(), 10);
   const textEnd   = parseInt(dec.decode(bytes.slice(18, 26)).trim(), 10);
-  const dataStart = parseInt(dec.decode(bytes.slice(26, 34)).trim(), 10);
-  const dataEnd   = parseInt(dec.decode(bytes.slice(34, 42)).trim(), 10);
+  let dataStart   = parseInt(dec.decode(bytes.slice(26, 34)).trim(), 10);
+  let dataEnd     = parseInt(dec.decode(bytes.slice(34, 42)).trim(), 10);
+
+  const kw = parseFCSTextSegment(bytes.slice(textStart, textEnd + 1));
+  if (dataStart === 0 && dataEnd === 0 && kw["$BEGINDATA"] && kw["$ENDDATA"]) {
+    dataStart = parseInt(kw["$BEGINDATA"].trim(), 10);
+    dataEnd   = parseInt(kw["$ENDDATA"].trim(), 10);
+  }
+
+  const nPar = parseInt((kw["$PAR"] || "0").trim(), 10);
+  const nTot = parseInt((kw["$TOT"] || "0").trim(), 10);
+  const dataType = (kw["$DATATYPE"] || "F").trim().toUpperCase();
+  const byteOrd = (kw["$BYTEORD"] || "1,2,3,4").trim();
+  const littleEndian = !byteOrd.startsWith("4,3");
+
+  const chNames = [];
+  const chBits = [];
+  for (let p = 1; p <= nPar; p++) {
+    chNames.push((kw[`$P${p}N`] || `P${p}`).trim());
+    chBits.push(parseInt((kw[`$P${p}B`] || (dataType === "D" ? "64" : "32")).trim(), 10));
+  }
+
+  // Parse binary DATA segment using DataView
+  const dv = new DataView(buf, dataStart, Math.max(0, dataEnd - dataStart + 1));
+  let offset = 0;
+  const rawLoaded = [];
+  for (let e = 0; e < nTot; e++) {
+    const ev = { idx: e + 1 };
+    for (let p = 0; p < nPar; p++) {
+      let val = 0.0;
+      const bits = chBits[p];
+      if (dataType === "F") {
+        val = dv.getFloat32(offset, littleEndian);
+        offset += 4;
+      } else if (dataType === "D") {
+        val = dv.getFloat64(offset, littleEndian);
+        offset += 8;
+      } else if (dataType === "I") {
+        if (bits === 8) { val = dv.getUint8(offset); offset += 1; }
+        else if (bits === 16) { val = dv.getUint16(offset, littleEndian); offset += 2; }
+        else if (bits === 64) {
+          const lo = dv.getUint32(offset, littleEndian);
+          const hi = dv.getUint32(offset + 4, littleEndian);
+          val = littleEndian ? (lo + hi * 4294967296.0) : (hi + lo * 4294967296.0);
+          offset += 8;
+        } else {
+          val = dv.getUint32(offset, littleEndian);
+          offset += 4;
+        }
+      }
+      ev[chNames[p]] = val;
+    }
+
+    // Ensure standard channel aliases if alternate FCS naming was used
+    if (ev["FL1-SYBR-A"] === undefined && ev["FL1-A"] !== undefined) ev["FL1-SYBR-A"] = ev["FL1-A"];
+    if (ev["FL2-PI-A"] === undefined && ev["FL2-A"] !== undefined) ev["FL2-PI-A"] = ev["FL2-A"];
+    if (ev["FL3-Cy5-A"] === undefined && ev["FL3-A"] !== undefined) ev["FL3-Cy5-A"] = ev["FL3-A"];
+    if (ev["TIME"] === undefined && ev["Time"] !== undefined) ev["TIME"] = ev["Time"];
+    rawLoaded.push(ev);
+  }
+
+  // Parse $SPILLOVER if present and compute compensated events
+  let spillCols = ["FL1-SYBR-A", "FL2-PI-A", "FL3-Cy5-A"];
+  let spillInv = INV_SPILLOVER;
+  if (kw["$SPILLOVER"]) {
+    const spParts = kw["$SPILLOVER"].split(",").map(s => s.trim()).filter(s => s.length > 0);
+    const nSp = parseInt(spParts[0], 10);
+    if (nSp >= 2 && spParts.length >= 1 + nSp + nSp * nSp) {
+      spillCols = spParts.slice(1, 1 + nSp);
+      const S = [];
+      let idx = 1 + nSp;
+      for (let r = 0; r < nSp; r++) {
+        const row = [];
+        for (let c = 0; c < nSp; c++) row.push(parseFloat(spParts[idx++]));
+        S.push(row);
+      }
+      const inv = invertSquareMatrix(S);
+      if (inv) spillInv = inv;
+    }
+  }
+
+  const compLoaded = rawLoaded.map((ev, e) => {
+    const c = { ...ev };
+    if (spillCols.every(col => ev[col] !== undefined) && spillInv.length === spillCols.length) {
+      const rawVec = spillCols.map(col => ev[col]);
+      for (let i = 0; i < spillCols.length; i++) {
+        let sum = 0.0;
+        for (let j = 0; j < spillCols.length; j++) sum += rawVec[j] * spillInv[j][i];
+        c[spillCols[i]] = sum;
+      }
+    }
+    const prevEv = state.rawEvents[e];
+    const fscA = c["FSC-A"] !== undefined ? c["FSC-A"] : 72000;
+    const fscH = c["FSC-H"] !== undefined ? c["FSC-H"] : 68000;
+    const fl2  = c["FL2-PI-A"] !== undefined ? c["FL2-PI-A"] : 400;
+    const pop  = fl2 > 8000 ? 2 : (fl2 > 1200 ? 1 : 0);
+
+    const transitMs = (prevEv && nTot === state.rawEvents.length) ? prevEv["TRANSIT-MS"] :
+      (pop === 0 ? 0.42 : (pop === 1 ? 1.25 : 3.40));
+    const blockRatio = (prevEv && nTot === state.rawEvents.length) ? prevEv["BLOCKAGE-RATIO"] :
+      Math.max(0.03, Math.min(0.45, (fscA / 650000)));
+    const deform = (prevEv && nTot === state.rawEvents.length) ? prevEv["DEFORMABILITY"] :
+      Math.max(1.01, Math.min(1.75, 0.60 + 0.92 * (fscH / Math.max(1.0, fscA))));
+    const circ = (prevEv && nTot === state.rawEvents.length) ? prevEv["CIRCULARITY"] :
+      (pop === 0 ? 0.89 : (pop === 1 ? 0.76 : 0.54));
+
+    ev.pop = pop; c.pop = pop;
+    ev["TRANSIT-MS"] = transitMs; c["TRANSIT-MS"] = transitMs;
+    ev["BLOCKAGE-RATIO"] = blockRatio; c["BLOCKAGE-RATIO"] = blockRatio;
+    ev["DEFORMABILITY"] = deform; c["DEFORMABILITY"] = deform;
+    ev["CIRCULARITY"] = circ; c["CIRCULARITY"] = circ;
+    return c;
+  });
+
+  if (rawLoaded.length > 0) {
+    state.rawEvents = rawLoaded;
+    state.compEvents = compLoaded;
+  }
 
   const hashBuf = await crypto.subtle.digest("SHA-256", buf);
   const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
 
-  state.fcsFileName = file.name;
+  state.fcsFileName = fileName;
   state.fcsSha256 = hashHex;
   document.getElementById("provenance-hash-box").innerHTML =
-    `File: ${file.name} (${ver})<br>SHA256: ${hashHex.slice(0, 24)}...<br>Offsets: TEXT [${textStart}..${textEnd}], DATA [${dataStart}..${dataEnd}]`;
-  document.getElementById("pipe-fcs-meta").textContent = `${file.name} (Loaded Binary)`;
+    `File: ${fileName} (${ver})<br>SHA256: ${hashHex.slice(0, 24)}...<br>Events: ${nTot} | Par: ${nPar} (${dataType})<br>Offsets: TEXT [${textStart}..${textEnd}], DATA [${dataStart}..${dataEnd}]`;
+  document.getElementById("pipe-fcs-meta").textContent = `${fileName} (${nTot} events, ${nPar} ch)`;
+  document.getElementById("footer-status-left").textContent =
+    `Parameters: ${nPar} FCS Channels + 4 Micropore Sensor Channels | Event Count: ${state.rawEvents.length} | Active File: ${fileName}`;
+
   evaluateAllGates();
+  runSingleCellClassifier();
   renderAllViews();
+}
+
+async function handleFCSUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const buf = await file.arrayBuffer();
+  await parseFCS31Buffer(buf, file.name);
+}
+
+async function handleSensorCSVUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const text = await file.text();
+  parseSensorCSVText(text, file.name);
+}
+
+function parseSensorCSVText(csvText, fileName) {
+  const lines = csvText.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0 && !l.startsWith("#"));
+  if (lines.length < 2) return;
+  const headers = lines[0].split(",").map(h => h.trim());
+  const nRows = lines.length - 1;
+  const keyAlias = {
+    "transit_dt_ms": "TRANSIT-MS",
+    "transit_time_ms": "TRANSIT-MS",
+    "TRANSIT-MS": "TRANSIT-MS",
+    "impedance_pulse": "BLOCKAGE-RATIO",
+    "blockage_ratio": "BLOCKAGE-RATIO",
+    "BLOCKAGE-RATIO": "BLOCKAGE-RATIO",
+    "deformability": "DEFORMABILITY",
+    "deformability_index": "DEFORMABILITY",
+    "DEFORMABILITY": "DEFORMABILITY",
+    "circularity": "CIRCULARITY",
+    "CIRCULARITY": "CIRCULARITY"
+  };
+
+  for (let r = 0; r < nRows; r++) {
+    const cols = lines[r + 1].split(",").map(c => c.trim());
+    const rowObj = {};
+    headers.forEach((h, idx) => { rowObj[h] = cols[idx]; });
+    const targetIdx = rowObj["event_index"] !== undefined ? (parseInt(rowObj["event_index"], 10) - 1) : r;
+    if (targetIdx >= 0 && targetIdx < state.rawEvents.length) {
+      const rawEv = state.rawEvents[targetIdx];
+      const compEv = state.compEvents[targetIdx];
+      Object.entries(keyAlias).forEach(([csvKey, evKey]) => {
+        if (rowObj[csvKey] !== undefined && !isNaN(parseFloat(rowObj[csvKey]))) {
+          rawEv[evKey] = parseFloat(rowObj[csvKey]);
+          compEv[evKey] = parseFloat(rowObj[csvKey]);
+        }
+      });
+      CHANNELS.forEach(ch => {
+        if (rowObj[ch] !== undefined && !isNaN(parseFloat(rowObj[ch]))) {
+          rawEv[ch] = parseFloat(rowObj[ch]);
+          compEv[ch] = parseFloat(rowObj[ch]);
+        }
+      });
+    }
+  }
+  document.getElementById("pipe-fcs-meta").textContent = `${state.fcsFileName} + ${fileName} (${nRows} sensor rows)`;
+  evaluateAllGates();
+  runSingleCellClassifier();
+  renderAllViews();
+}
+
+function attachFileDropZone() {
+  window.addEventListener("dragover", e => { e.preventDefault(); });
+  window.addEventListener("drop", async e => {
+    e.preventDefault();
+    if (!e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+    const file = e.dataTransfer.files[0];
+    if (file.name.toLowerCase().endsWith(".fcs")) {
+      const buf = await file.arrayBuffer();
+      await parseFCS31Buffer(buf, file.name);
+    } else if (file.name.toLowerCase().endsWith(".csv")) {
+      const text = await file.text();
+      parseSensorCSVText(text, file.name);
+    }
+  });
 }
 
 function exportGatesAndAnalysisJSON() {
@@ -2084,9 +2581,12 @@ function exportGatesAndAnalysisJSON() {
 }
 
 function exportClassifiedCSV() {
-  let csv = "event_index,predicted_class,final_decision,confidence,deferred\n";
-  for (const p of state.predictions) {
-    csv += `${p.idx},${p.predClass},${p.finalDecision},${p.confidence.toFixed(6)},${p.deferred}\n`;
+  const ds = getActiveDataset();
+  let csv = "event_index,predicted_class,final_decision,confidence,deferred,transit_dt_ms,blockage_ratio,deformability\n";
+  for (let i = 0; i < state.predictions.length; i++) {
+    const p = state.predictions[i];
+    const ev = ds[i] || {};
+    csv += `${p.idx},${p.predClass},${p.finalDecision},${p.confidence.toFixed(6)},${p.deferred},${(ev["TRANSIT-MS"] || 0).toFixed(4)},${(ev["BLOCKAGE-RATIO"] || 0).toFixed(4)},${(ev["DEFORMABILITY"] || 0).toFixed(4)}\n`;
   }
   const blob = new Blob([csv], { type: "text/csv" });
   const a = document.createElement("a");
@@ -2102,6 +2602,7 @@ window.addEventListener("DOMContentLoaded", () => {
     xSel.add(new Option(ch, ch));
     ySel.add(new Option(ch, ch));
   });
+  ySel.add(new Option("1D Histogram (Count)", "HISTOGRAM"));
   xSel.value = state.panels[0].xCh;
   ySel.value = state.panels[0].yCh;
   document.getElementById("sel-x-scale").value = state.panels[0].xScale;
@@ -2115,6 +2616,8 @@ window.addEventListener("DOMContentLoaded", () => {
     attachInteractiveGateDrawing(`canvas-${i}`, () => state.panels[i]);
   }
   attachInteractiveGateDrawing("canvas-single", () => state.panels[state.selectedPanel]);
+  attach3DRotation();
+  attachFileDropZone();
 
   window.addEventListener("resize", renderAllViews);
 });

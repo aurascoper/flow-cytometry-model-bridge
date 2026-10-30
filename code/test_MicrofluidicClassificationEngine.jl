@@ -57,11 +57,29 @@ using .MicrofluidicClassificationEngine
         parsed_i_lit = parse_fcs_bytes(bytes_i_lit)
         @test isapprox(parsed_i_lit.events, round.(ds.events); atol=1.0)
 
+        # Verify 16-bit integer (:I) channel round-trip and truncated DATA guard
+        ch16 = [FCSChannelMetadata(1, "FSC-A"; range=65535.0, bits=16),
+                FCSChannelMetadata(2, "SSC-A"; range=65535.0, bits=16)]
+        ds16 = FCSDataset(ds.provenance, ch16, Dict{String,String}(), [1200.0 3400.0; 5600.0 7800.0])
+        bytes16 = serialize_fcs_bytes(ds16; endian=:big, datatype=:I)
+        parsed16 = parse_fcs_bytes(bytes16)
+        @test parsed16.channels[1].bits == 16
+        @test parsed16.events == [1200.0 3400.0; 5600.0 7800.0]
+        @test_throws ArgumentError parse_fcs_bytes(bytes16[1:(end - 2)])
+
         # Subset events preserves channel metadata and records parent SHA-256
         mask = BitVector([i <= 120 for i in 1:300])
         sub_ds = subset_events(loaded_ds, mask; suffix="first120")
         @test n_events(sub_ds) == 120
         @test sub_ds.keywords["\$PARENT_SHA256"] == loaded_ds.provenance.sha256
+
+        # Zero-event gated subset round-trips cleanly through binary FCS 3.1
+        empty_ds = subset_events(loaded_ds, falses(300); suffix="empty")
+        @test n_events(empty_ds) == 0
+        empty_bytes = serialize_fcs_bytes(empty_ds; endian=:little, datatype=:F)
+        parsed_empty = parse_fcs_bytes(empty_bytes)
+        @test n_events(parsed_empty) == 0
+        @test n_channels(parsed_empty) == 7
 
         # Sensor trajectory CSV round-trip
         mktempdir() do tmpdir
@@ -91,20 +109,23 @@ using .MicrofluidicClassificationEngine
         synth = generate_synthetic_nanobio_fcs_dataset(n_events=300, seed=20261029)
         ds = synth.dataset
 
-        # Transform invertibility across positive, zero, and negative values
+        # Transform invertibility across positive, zero, and extreme negative values
         t_lin = LinearTransform(2.5, -10.0)
         t_log = Log10Transform(10.0)
         t_ash = ArcsinhTransform(150.0)
         t_lgc = BiexponentialLogicleTransform(150.0)
 
-        for x in (-120.0, 0.0, 50.0, 15_000.0)
-            @test isapprox(inverse_transform(t_lin, apply_transform(t_lin, x)), x; atol=1e-9)
-            @test isapprox(inverse_transform(t_ash, apply_transform(t_ash, x)), x; atol=1e-9)
-            @test isapprox(inverse_transform(t_lgc, apply_transform(t_lgc, x)), x; atol=1e-9)
+        for x in (-1.0e6, -2.5e4, -120.0, 0.0, 50.0, 15_000.0)
+            @test isapprox(inverse_transform(t_lin, apply_transform(t_lin, x)), x; rtol=1e-9, atol=1e-8)
+            @test isapprox(inverse_transform(t_ash, apply_transform(t_ash, x)), x; rtol=1e-9, atol=1e-8)
+            @test isapprox(inverse_transform(t_lgc, apply_transform(t_lgc, x)), x; rtol=1e-9, atol=1e-8)
         end
         for x in (0.0, 25.0, 10_000.0)
             @test isapprox(inverse_transform(t_log, apply_transform(t_log, x)), x; atol=1e-9)
         end
+
+        # Near-singular spillover matrix rejection
+        @test_throws ArgumentError SpilloverMatrix(["FL1", "FL2"], [1.0 0.9999; 0.9999 1.0])
 
         # Spillover parsing, formatting, and exact unmixing recovery
         spill = parse_fcs_spillover(ds.keywords["\$SPILLOVER"])
@@ -533,6 +554,19 @@ using .MicrofluidicClassificationEngine
         end
         # High-uptake cell fraction increases as nanocarrier release progresses in the channel
         @test cms_sol.snapshots[end].predicted_uptake_state.fractions[1] > cms_sol.snapshots[1].predicted_uptake_state.fractions[1]
+
+        # Stress-test highly discontinuous diffusivity ratio (D_inner / D_outer > 10^4) and thin stratum at n_radial_nodes = 12
+        cms_discont = CoreMultishellSpec(
+            radii_um = [0.35, 0.37, 1.00],
+            diffusivities_um2_s = [25.0, 0.001, 0.0005],
+            decay_rates_s = [0.05, 0.20, 0.50],
+            initial_concentrations = [0.030, 0.020, 0.010],
+            membrane_permeability_um_s = 2.5,
+            channel_flow_velocity_mm_s = 15.0
+        )
+        sol_discont = solve_core_multishell_rd(cms_discont; times_s=[0.0, 1.0, 5.0], n_radial_nodes=12)
+        @test all(x -> x > 0.0, sol_discont.snapshots[1].stratum_mean_concentrations)
+        @test 0.0 <= sol_discont.snapshots[2].cumulative_release_fraction <= sol_discont.snapshots[3].cumulative_release_fraction <= 1.0
 
         # Enforce strict track and epistemic boundaries on CoreMultishellSpec
         @test_throws ArgumentError CoreMultishellSpec(track=:track3_bitumen_rheology)
