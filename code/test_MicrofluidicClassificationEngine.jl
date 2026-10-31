@@ -617,4 +617,354 @@ using .MicrofluidicClassificationEngine
         @test_throws ArgumentError EmulsionDropletSpec(track=:track1_nanobio)
         @test_throws ArgumentError EmulsionDropletSpec(has_biological_release_shells=true)
     end
+
+    # =======================================================================
+    # 6. Module 6 (BiofilmMultiphysics): Milestones M3 & M4 constitutive,
+    #    transport, quorum-sensing, EV, and subpopulation dynamics
+    # =======================================================================
+    @testset "Module 6 (BiofilmMultiphysics): Milestones M3 and M4" begin
+        # 6A. M3: BiofilmMatrixComposition & PNAS Oct 2026 PGA swelling vs curli/EPS wrinkling
+        comp_wt = BiofilmMatrixComposition(
+            pga_kg_m3 = 18.0, eps_kg_m3 = 28.0, curli_kg_m3 = 10.0,
+            cellulose_kg_m3 = 6.0, porosity = 0.78, epistemic_status = :assumed
+        )
+        comp_no_pga = BiofilmMatrixComposition(
+            pga_kg_m3 = 0.0, eps_kg_m3 = 28.0, curli_kg_m3 = 10.0,
+            cellulose_kg_m3 = 6.0, porosity = 0.78, epistemic_status = :assumed
+        )
+        comp_high_pga_soft = BiofilmMatrixComposition(
+            pga_kg_m3 = 35.0, eps_kg_m3 = 12.0, curli_kg_m3 = 2.0,
+            cellulose_kg_m3 = 1.0, porosity = 0.85, epistemic_status = :assumed
+        )
+        @test isapprox(total_matrix_biopolymer_kg_m3(comp_wt), 62.0; atol=1e-12)
+
+        mech_spec = ThinFilmSwellingMechanicsSpec(
+            film_thickness_um = 45.0,
+            substrate_modulus_pa = 600.0
+        )
+        m_wt = evaluate_biofilm_swelling_mechanics(comp_wt, mech_spec)
+        m_no_pga = evaluate_biofilm_swelling_mechanics(comp_no_pga, mech_spec)
+        m_soft = evaluate_biofilm_swelling_mechanics(comp_high_pga_soft, mech_spec)
+
+        # PGA drives hydration and swelling pressure; deleting PGA collapses swelling pressure
+        @test m_wt.hydration_fraction > m_no_pga.hydration_fraction
+        @test m_wt.swelling_pressure_pa > 4.0 * m_no_pga.swelling_pressure_pa
+        @test m_no_pga.morphological_phase == :rigid_compact_mat
+        # Curli and EPS increase composite elastic modulus
+        @test m_wt.composite_modulus_pa > m_soft.composite_modulus_pa
+        # High PGA osmotic swelling on compliant substrate triggers thin-film wrinkling
+        @test m_soft.wrinkling_index > 1.0
+        @test m_soft.wrinkled
+        @test m_soft.morphological_phase == :wrinkled_buckled_colony
+        @test m_soft.wrinkle_wavelength_um > 50.0
+
+        # Switching off PGA swelling hypothesis cleanly disables swelling pressure
+        sw_no_swell = BiofilmHypothesisSwitches(enable_pga_swelling_mechanics = false)
+        m_disabled = evaluate_biofilm_swelling_mechanics(comp_wt, mech_spec; switches=sw_no_swell)
+        @test m_disabled.swelling_pressure_pa == 0.0
+        @test m_disabled.morphological_phase == :flat_unswollen
+
+        # 6B. M3: UPEC npj Biofilms Oct 2026 spatially heterogeneous diffusivity D_eff(x,t; M, r, q)
+        diff_small_neutral = HeterogeneousDiffusivitySpec(
+            aqueous_diffusivity_m2_s = 6.0e-10, probe_radius_nm = 1.0,
+            probe_charge_valence = 0.0, ionic_strength_mol_l = 0.15
+        )
+        diff_large_cationic = HeterogeneousDiffusivitySpec(
+            aqueous_diffusivity_m2_s = 6.0e-10, probe_radius_nm = 4.5,
+            probe_charge_valence = 2.0, ionic_strength_mol_l = 0.05
+        )
+        d_sn = compute_effective_diffusivity(comp_wt, diff_small_neutral)
+        d_lc = compute_effective_diffusivity(comp_wt, diff_large_cationic)
+        @test d_sn.d_eff_m2_s > 3.0 * d_lc.d_eff_m2_s
+        @test d_lc.curli_sieving_factor < d_sn.curli_sieving_factor
+        @test d_lc.electrostatic_factor < 1.0
+        @test isapprox(d_sn.electrostatic_factor, 1.0; atol=1e-12)
+
+        # Switching off heterogeneous diffusion returns porosity-scaled homogeneous diffusivity
+        sw_hom_diff = BiofilmHypothesisSwitches(enable_heterogeneous_matrix_diffusion = false)
+        d_hom = compute_effective_diffusivity(comp_wt, diff_large_cationic; switches=sw_hom_diff)
+        @test isapprox(d_hom.d_eff_m2_s, 6.0e-10 * comp_wt.porosity; rtol=1e-12)
+
+        # Spatial diffusivity field across 1D depth profile (surface porous -> deep dense curli)
+        n_cells = 16
+        x_grid = collect(range(0.0, 150.0e-6; length=n_cells))
+        comps_1d = [
+            BiofilmMatrixComposition(
+                pga_kg_m3 = 10.0 + 10.0 * (i / n_cells),
+                eps_kg_m3 = 15.0 + 25.0 * (i / n_cells),
+                curli_kg_m3 = 2.0 + 18.0 * (i / n_cells),
+                cellulose_kg_m3 = 4.0,
+                porosity = 0.86 - 0.20 * (i / n_cells)
+            )
+            for i in 1:n_cells
+        ]
+        dfield = compute_spatial_diffusivity_field(comps_1d, diff_large_cationic)
+        @test dfield.heterogeneity_ratio > 2.5
+        @test dfield.d_eff_m2_s[1] > dfield.d_eff_m2_s[end]
+
+        # 6C. M3: Localized bioelectronic delivery source S_i(x,t) and 1D conservative FV transport
+        src_spec = LocalizedDeliverySourceSpec(
+            actuator_position_m = 50.0e-6,
+            spatial_spread_m = 15.0e-6,
+            peak_release_rate_mol_m3_s = 0.40,
+            pulse_start_s = 0.0,
+            pulse_duration_s = 10.0,
+            duty_cycle = 0.80,
+            carrier_type = :bioelectronic_ion_pump
+        )
+        @test evaluate_localized_source_term(50.0e-6, 5.0, src_spec) > 0.30
+        @test evaluate_localized_source_term(50.0e-6, 25.0, src_spec) == 0.0
+        @test evaluate_localized_source_term(
+            50.0e-6, 5.0, src_spec;
+            switches=BiofilmHypothesisSwitches(enable_localized_bioelectronic_delivery=false)
+        ) == 0.0
+
+        rt_sol = solve_1d_reactive_transport_biofilm(
+            x_grid_m = x_grid,
+            times_s = [0.0, 2.0, 6.0, 12.0],
+            compositions = comps_1d,
+            diff_spec = diff_large_cationic,
+            source_spec = src_spec,
+            initial_concentration_mol_m3 = fill(0.10, n_cells),
+            first_order_uptake_s = 0.02,
+            boundary_left_flux_mol_m2_s = 0.0,
+            boundary_right_flux_mol_m2_s = 0.0
+        )
+        @test rt_sol.mass_conserved
+        @test rt_sol.relative_mass_balance_error < 1e-12
+        @test rt_sol.cumulative_source_mol_m2 > 0.0
+        @test rt_sol.cumulative_uptake_mol_m2 > 0.0
+        @test maximum(rt_sol.profiles_mol_m3[3]) > 0.10
+
+        # 6D. M4: Electrokinetic / ROS AHL degradation in supernatant vs intact biofilm (Oct 17, 2026)
+        ek_spec = ElectrokineticQSSpec(
+            electric_field_v_m = 2000.0,
+            ros_generation_factor = 1.2,
+            k_electric_ros_s = 0.020,
+            k_enzymatic_qq_s = 0.003,
+            matrix_shielding_coeff = 0.06
+        )
+        deg_supernatant = evaluate_qs_signal_degradation(2.0, ek_spec; intact_biofilm_matrix=nothing)
+        deg_biofilm = evaluate_qs_signal_degradation(2.0, ek_spec; intact_biofilm_matrix=comp_wt)
+        @test deg_supernatant.matrix_transmission_factor == 1.0
+        @test deg_biofilm.matrix_transmission_factor < 0.30
+        @test deg_supernatant.removal_flux_um_s > 3.0 * deg_biofilm.removal_flux_um_s
+
+        # 6E. M4: Three-mode polymicrobial QS crosstalk (Critical Reviews in Microbiology Oct 2026)
+        ct_spec = PolymicrobialCrosstalkSpec(
+            direct_receptor_competition_coeff = 0.40,
+            chemical_effector_inhibition_coeff = 0.50,
+            alkaline_lactonolysis_coeff = 0.30,
+            redox_modulation_coeff = 0.15
+        )
+        ct_neutral = evaluate_polymicrobial_crosstalk(
+            ct_spec; cognate_signal_um=1.0, non_cognate_signal_um=0.0,
+            chemical_effector_um=0.0, local_ph=7.0, local_eh_mv=100.0
+        )
+        ct_competed = evaluate_polymicrobial_crosstalk(
+            ct_spec; cognate_signal_um=1.0, non_cognate_signal_um=2.5,
+            chemical_effector_um=1.8, local_ph=8.3, local_eh_mv=-80.0
+        )
+        @test ct_neutral.direct_signal_perception_factor == 1.0
+        @test ct_neutral.chemical_effector_factor == 1.0
+        @test ct_neutral.environment_lactonolysis_rate_h == 0.0
+        @test ct_competed.direct_signal_perception_factor < 0.60
+        @test ct_competed.chemical_effector_factor < 0.60
+        @test ct_competed.environment_lactonolysis_rate_h > 0.50
+        @test ct_competed.net_receptor_drive_multiplier < 0.35
+
+        # 6F. M4: Coupled Droop quota, RNAIII vs alpha-PSM EV biogenesis (mBio Oct 2026),
+        #         and S. aureus fruA/fruK vancomycin-tolerant heterogeneity (ISME J Oct 2026)
+        init_reg = BiofilmRegulatoryState(
+            time_h = 0.0,
+            extracellular_nutrient_mm = 4.0,
+            intracellular_quota_q = 0.85,
+            autoinducer_um = 0.12,
+            receptor_activity_r = 0.08,
+            rnaiii_activity = 0.08,
+            alpha_psm_activity = 0.08,
+            ev_particles_per_ml = 1.0e6,
+            frac_basal_planktonic = 0.82,
+            frac_fructose_hirt_tolerant = 0.06,
+            frac_metabolically_reduced = 0.06,
+            frac_oxidative_stress_repair = 0.06
+        )
+        reg_params = BiofilmRegulatoryParams(
+            topology = QSRegulatoryTopology(topology_id=:staphylococcus_agr_rnaiii_psm, rnaiii_psm_decoupled=true),
+            oxidative_stress_index = 1.2,
+            fructose_flux_index = 1.8,
+            vancomycin_exposure_ug_ml = 4.0
+        )
+        traj = simulate_biofilm_regulatory_trajectory(
+            init_reg, reg_params;
+            times_h = collect(0.0:2.0:12.0),
+            electrokinetic_spec = ek_spec,
+            intact_matrix = comp_wt,
+            crosstalk_spec = ct_spec,
+            non_cognate_signal_um = 0.2,
+            chemical_effector_um = 0.1,
+            local_ph = 7.4
+        )
+        @test length(traj) == 7
+        final_reg = traj[end]
+        @test final_reg.extracellular_nutrient_mm < init_reg.extracellular_nutrient_mm
+        @test final_reg.ev_particles_per_ml > init_reg.ev_particles_per_ml
+        # Under oxidative + nutrient stress, alpha-PSM activity decouples from RNAIII activity
+        @test final_reg.alpha_psm_activity > final_reg.rnaiii_activity
+        # Under fructose flux + vancomycin exposure, fruA/fruK tolerant and stress subpopulations expand
+        @test final_reg.frac_fructose_hirt_tolerant > init_reg.frac_fructose_hirt_tolerant
+        @test final_reg.frac_oxidative_stress_repair > init_reg.frac_oxidative_stress_repair
+        @test isapprox(
+            final_reg.frac_basal_planktonic + final_reg.frac_fructose_hirt_tolerant +
+            final_reg.frac_metabolically_reduced + final_reg.frac_oxidative_stress_repair,
+            1.0; atol=1e-9
+        )
+
+        # Project physiological subpopulations into 3-state CellStatePrediction
+        fcm_viab = subpopulations_to_fcm_state(final_reg; total_cells_per_ml=2.5e7, collapse_mode=:viability_3state)
+        fcm_tol  = subpopulations_to_fcm_state(final_reg; total_cells_per_ml=2.5e7, collapse_mode=:tolerance_3state)
+        @test isapprox(sum(fcm_viab.fractions), 1.0; atol=1e-12)
+        @test isapprox(sum(fcm_tol.fractions), 1.0; atol=1e-12)
+        @test isapprox(fcm_tol.fractions[1], final_reg.frac_fructose_hirt_tolerant; atol=1e-12)
+        @test_throws ArgumentError subpopulations_to_fcm_state(final_reg; collapse_mode=:unknown_mode)
+    end
+
+    # =======================================================================
+    # 7. Milestone M5 & Multiphysics Bridge Integration:
+    #    Domain-shift PSI detection, synthetic-vs-empirical generalization
+    #    auditing, and OpenFOAMMeshExchange + PHREEQCSpeciesAdapter bridge
+    # =======================================================================
+    @testset "Milestone M5: Domain shift, empirical generalization, and mesh/species bridge" begin
+        chip1 = generate_synthetic_nanobio_fcs_dataset(
+            n_events=150, sample_id="S1", chip_id="CHIP-01", run_id="RUN-1", biological_replicate="REP-1", seed=501)
+        chip2 = generate_synthetic_nanobio_fcs_dataset(
+            n_events=150, sample_id="S2", chip_id="CHIP-02", run_id="RUN-2", biological_replicate="REP-2", seed=502)
+
+        f1 = extract_single_cell_features(chip1.dataset; transit_rows=chip1.sensor_rows)
+        f2 = extract_single_cell_features(chip2.dataset; transit_rows=chip2.sensor_rows)
+
+        # In-distribution chips exhibit low PSI and z-shift
+        shift_in_dist = detect_feature_domain_shift(
+            f1.features, f2.features;
+            feature_names = f1.feature_names,
+            psi_threshold = 0.35,
+            z_threshold = 1.5
+        )
+        @test !shift_in_dist.shifted
+        @test shift_in_dist.max_abs_z_shift < 1.0
+
+        # Perturbed out-of-distribution evaluation matrix triggers domain-shift alert
+        X_shifted = copy(f2.features)
+        X_shifted[:, 1] .+= 4.5 .* std(f1.features[:, 1])
+        shift_ood = detect_feature_domain_shift(
+            f1.features, X_shifted;
+            feature_names = f1.feature_names,
+            psi_threshold = 0.25,
+            z_threshold = 1.5
+        )
+        @test shift_ood.shifted
+        @test f1.feature_names[1] in shift_ood.shifted_features
+        @test shift_ood.max_psi > 0.25
+        @test shift_ood.max_abs_z_shift > 3.0
+
+        # Train classifier on CHIP-01 and evaluate on CHIP-02 for :nanocarrier_uptake
+        clf_up = train_cell_classifier(
+            f1.features, chip1.labels[:nanocarrier_uptake];
+            feature_names = f1.feature_names,
+            target_task = :nanocarrier_uptake,
+            group_ids = fill("CHIP-01", 150),
+            split_group_key = :chip_id
+        )
+        preds_up = predict_cells(clf_up, f2.features)
+        rep_up = evaluate_classifier_predictions(
+            preds_up, chip2.labels[:nanocarrier_uptake],
+            default_classes_for_target(:nanocarrier_uptake);
+            target_task = :nanocarrier_uptake,
+            group_ids = fill("CHIP-02", 150)
+        )
+        @test rep_up.accepted_accuracy > 0.90
+
+        # Synthetic benchmark protocol must block empirical generalization claims despite >90% accuracy
+        synth_proto = EmpiricalValidationProtocol(
+            protocol_id = "SYNTH-UPTAKE-01",
+            track = :track1_nanobio,
+            data_provenance = :synthetic_simulation,
+            independent_reference_labels = false,
+            counting_beads_verified = true,
+            internalization_imaging_verified = false,
+            n_independent_runs = 2,
+            n_heldout_runs = 1,
+            external_solvers_coupled_in_production = false
+        )
+        audit_synth = audit_classifier_empirical_generalization(
+            rep_up, synth_proto; feature_psi_drift = shift_in_dist.max_psi
+        )
+        @test !audit_synth.empirically_generalizable
+        @test audit_synth.synthetic_benchmark_only
+        @test audit_synth.claim_level == :synthetic_software_benchmark_only
+        @test audit_synth.internalization_surface_warning
+        @test "nanocarrier_uptake_surface_vs_internalization_unverified" in audit_synth.blocking_reasons
+
+        # Full empirical protocol with quenched internalization control passes readiness check
+        emp_proto = EmpiricalValidationProtocol(
+            protocol_id = "EMP-UPTAKE-02",
+            track = :track1_nanobio,
+            data_provenance = :deidentified_experimental_fcs,
+            independent_reference_labels = true,
+            counting_beads_verified = true,
+            internalization_imaging_verified = true,
+            n_independent_runs = 3,
+            n_heldout_runs = 1,
+            external_solvers_coupled_in_production = false
+        )
+        audit_emp = audit_classifier_empirical_generalization(
+            rep_up, emp_proto; feature_psi_drift = shift_in_dist.max_psi
+        )
+        @test audit_emp.empirically_generalizable
+        @test !audit_emp.synthetic_benchmark_only
+        @test audit_emp.claim_level == :empirical_heldout_generalization_verified
+        @test isempty(audit_emp.blocking_reasons)
+
+        # Bridge with full OpenFOAMMeshExchange and PHREEQCSpeciesAdapter
+        cond = MicrofluidicAssayCondition(chip_id="CHIP-02", run_id="RUN-2", sample_id="S2", biological_replicate="REP-2")
+        joined = join_cytometry_and_microfluidics(
+            chip2.dataset, sensor_rows_to_transit_events(chip2.sensor_rows), cond;
+            predictions = preds_up
+        )
+        fcm_up = summarize_to_fcm_sample(
+            preds_up;
+            bead_events = 100, beads_added = 12_000.0, sample_volume_ml = 0.10,
+            sample_origin = :effluent,
+            state_order = (:high_uptake_active, :low_uptake_passive, :unbound_negative)
+        )
+        cal = GateCalibration([0.93 0.04 0.01; 0.05 0.91 0.05; 0.02 0.05 0.94]; detection_efficiency=0.90)
+        mesh_ex = OpenFOAMMeshExchange(
+            vessel_id = "CHIP-02", time_h = 2.0, timestep_s = 0.02,
+            compartment = :effluent,
+            cell_centers_m = [0.0 0.0 0.0; 1.0e-4 0.0 0.0],
+            cell_volumes_m3 = [1.0e-10, 1.0e-10],
+            internal_field = [2.5, 2.1]
+        )
+        ph_ad = PHREEQCSpeciesAdapter(
+            vessel_id = "CHIP-02", time_h = 2.0, compartment = :effluent,
+            pH = 7.2, pe = 4.0, ionic_strength_M = 0.10,
+            species_molalities_mol_kgw = Dict("Na+" => 0.10, "Cl-" => 0.10),
+            species_charges = Dict("Na+" => 1, "Cl-" => -1)
+        )
+        bridge_mp = bridge_to_observation_model(
+            joined, fcm_up.sample_summary, cal;
+            state_prediction = fcm_up.state_prediction,
+            mesh_transport = mesh_ex,
+            species_chemistry = ph_ad,
+            empirical_protocol = synth_proto,
+            vessel_id = "CHIP-02",
+            time_h = 2.0,
+            heldout_validated = true
+        )
+        # Because synth_proto contains synthetic events, audit_record.heldout_validated is downgraded to false
+        @test !bridge_mp.audit_record.heldout_validated
+        @test any(q -> startswith(q.name, "openfoam_mesh_exchange_"), bridge_mp.audit_record.quantities)
+        @test any(q -> q.name == "phreeqc_species_ph", bridge_mp.audit_record.quantities)
+    end
 end
+

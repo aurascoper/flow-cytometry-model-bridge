@@ -15,10 +15,14 @@ import ..FlowCytometryObservationModel
 using ..FlowCytometryObservationModel:
     MODEL_ADAPTER_VERSION, VALID_SAMPLE_ORIGINS, VALID_VOLUME_CONVENTIONS,
     VALID_STAKEHOLDER_TRACKS, VALID_EPISTEMIC_STATUSES, REQUIRED_CSV_COLUMNS,
+    VALID_OPENFOAM_FIELD_CLASSES, VALID_OPENFOAM_PATCH_TYPES, VALID_DATA_PROVENANCES,
     CellStatePrediction, GateCalibration, FCMSampleSummary,
     MESFCalibrationCurve, BeadSizeCalibration, ConcentrationUncertainty,
     OpenFOAMTransportSnap, PHREEQCSpeciationSnap, StakeholderTrackContract,
     EpistemicQuantity, ProductionAuditRecord,
+    OpenFOAMBoundaryPatch, OpenFOAMMeshExchange,
+    PHREEQCMineralPhase, PHREEQCSpeciesAdapter,
+    EmpiricalValidationProtocol,
     effective_sample_volume_ml, expected_cell_events,
     predicted_gate_probabilities, absolute_cells_per_ml,
     verify_concentration_likelihood_consistency,
@@ -31,9 +35,15 @@ using ..FlowCytometryObservationModel:
     concentration_uncertainty, check_parameter_identifiability, evaluate_equifinality,
     split_train_holdout, posterior_predictive_check,
     validate_solver_observation_alignment, validate_sample_csv_header,
-    build_production_audit_record
+    build_production_audit_record,
+    serialize_openfoam_ascii_field, parse_openfoam_ascii_field,
+    map_openfoam_field_conservative, audit_openfoam_transport_stability,
+    summarize_openfoam_mesh_to_snap,
+    audit_phreeqc_speciation_balance, serialize_phreeqc_selected_output,
+    parse_phreeqc_selected_output, summarize_phreeqc_adapter_to_snap,
+    evaluate_empirical_generalization_readiness
 
-const ENGINE_VERSION = "0.2.0"
+const ENGINE_VERSION = "0.3.0"
 
 # ===========================================================================
 # MODULE 1: FCSIO
@@ -1608,6 +1618,7 @@ using LinearAlgebra
 using Statistics
 using Random
 import ..FCSIO: FCSDataset, SensorTrajectoryRow, n_events, get_channel_vector
+import ..FlowCytometryObservationModel: EmpiricalValidationProtocol, evaluate_empirical_generalization_readiness
 
 export VALID_CLASSIFICATION_TARGETS, VALID_SPLIT_GROUP_KEYS,
        default_classes_for_target,
@@ -1616,7 +1627,8 @@ export VALID_CLASSIFICATION_TARGETS, VALID_SPLIT_GROUP_KEYS,
        extract_single_cell_features, fit_standardizer, apply_standardizer,
        train_cell_classifier, predict_cells,
        group_aware_split, verify_no_group_leakage,
-       evaluate_classifier_predictions, group_cross_validate
+       evaluate_classifier_predictions, group_cross_validate,
+       detect_feature_domain_shift, audit_classifier_empirical_generalization
 
 const VALID_CLASSIFICATION_TARGETS = (
     :cell_type,
@@ -2153,6 +2165,147 @@ function group_cross_validate(X::AbstractMatrix{<:Real},
     return (report = report, oof_predictions = oof_preds)
 end
 
+"""
+Detect covariate domain shift between training feature matrix `X_train` and
+evaluation feature matrix `X_eval` using Population Stability Index (PSI)
+and standardized mean shift (`z_shift`) across each feature column.
+"""
+function detect_feature_domain_shift(
+        X_train::AbstractMatrix{<:Real},
+        X_eval::AbstractMatrix{<:Real};
+        feature_names::AbstractVector{<:AbstractString},
+        n_bins::Int=10,
+        psi_threshold::Real=0.25,
+        z_threshold::Real=1.5)
+    n_tr, d = size(X_train)
+    n_ev, d_ev = size(X_eval)
+    d == d_ev && length(feature_names) == d ||
+        throw(ArgumentError("X_train, X_eval, and feature_names must have matching column count"))
+    n_tr >= 10 && n_ev >= 5 ||
+        throw(ArgumentError("detect_feature_domain_shift requires at least 10 training rows and 5 evaluation rows"))
+    n_bins >= 4 || throw(ArgumentError("n_bins must be >= 4"))
+    psi_th = Float64(psi_threshold)
+    z_th = Float64(z_threshold)
+    psi_th > 0 && z_th > 0 || throw(ArgumentError("psi_threshold and z_threshold must be > 0"))
+
+    feature_psi = Dict{String,Float64}()
+    feature_z_shift = Dict{String,Float64}()
+    shifted_features = String[]
+    max_psi = 0.0
+    max_z = 0.0
+
+    probs = collect(range(0.0, 1.0; length=n_bins + 1))
+    for j in 1:d
+        fname = String(feature_names[j])
+        tr_col = Float64.(view(X_train, :, j))
+        ev_col = Float64.(view(X_eval, :, j))
+        mu_tr = mean(tr_col)
+        sd_tr = max(std(tr_col), 1e-9)
+        mu_ev = mean(ev_col)
+        z_j = abs(mu_ev - mu_tr) / sd_tr
+
+        edges = quantile(tr_col, probs)
+        edges[1] = -Inf
+        edges[end] = Inf
+        psi_j = 0.0
+        for b in 1:n_bins
+            lo = edges[b]
+            hi = edges[b + 1]
+            cnt_tr = b == 1 ? count(x -> lo <= x <= hi, tr_col) : count(x -> lo < x <= hi, tr_col)
+            cnt_ev = b == 1 ? count(x -> lo <= x <= hi, ev_col) : count(x -> lo < x <= hi, ev_col)
+            p_tr = max(cnt_tr / n_tr, 1e-4)
+            p_ev = max(cnt_ev / n_ev, 1e-4)
+            psi_j += (p_ev - p_tr) * log(p_ev / p_tr)
+        end
+
+        feature_psi[fname] = psi_j
+        feature_z_shift[fname] = z_j
+        if psi_j > max_psi
+            max_psi = psi_j
+        end
+        if z_j > max_z
+            max_z = z_j
+        end
+        if psi_j > psi_th || z_j > z_th
+            push!(shifted_features, fname)
+        end
+    end
+
+    sort!(shifted_features)
+    return (
+        shifted = !isempty(shifted_features),
+        max_psi = max_psi,
+        max_abs_z_shift = max_z,
+        feature_psi = feature_psi,
+        feature_z_shift = feature_z_shift,
+        shifted_features = shifted_features
+    )
+end
+
+"""
+Audit whether a single-cell `ClassifierValidationReport` and its associated
+`EmpiricalValidationProtocol` support empirical generalization claims, or must
+remain explicitly labeled as synthetic software verification.
+"""
+function audit_classifier_empirical_generalization(
+        report::ClassifierValidationReport,
+        protocol::EmpiricalValidationProtocol;
+        feature_psi_drift::Real=0.0,
+        max_psi_threshold::Real=0.25,
+        min_accepted_accuracy::Real=0.80,
+        max_ece::Real=0.12)
+    psi_val = Float64(feature_psi_drift)
+    psi_th = Float64(max_psi_threshold)
+    acc_th = Float64(min_accepted_accuracy)
+    ece_th = Float64(max_ece)
+    psi_val >= 0 && psi_th > 0 && (0.0 < acc_th <= 1.0) && (0.0 < ece_th <= 1.0) ||
+        throw(ArgumentError("invalid threshold parameters in audit_classifier_empirical_generalization"))
+
+    proto_eval = evaluate_empirical_generalization_readiness(
+        protocol;
+        target_task = report.target_task,
+        synthetic_accuracy = report.overall_accuracy,
+        heldout_run_accuracy = report.accepted_accuracy,
+        min_empirical_accuracy = acc_th,
+        feature_psi_drift = psi_val,
+        max_allowed_psi = psi_th
+    )
+    blockers = copy(proto_eval.blocking_reasons)
+    if report.accepted_accuracy < acc_th
+        push!(blockers, "accepted_accuracy_below_threshold")
+    end
+    if report.expected_calibration_error > ece_th
+        push!(blockers, "expected_calibration_error_above_threshold")
+    end
+    if psi_val > psi_th
+        push!(blockers, "covariate_domain_shift_psi_exceeded")
+    end
+    if report.target_task == :nanocarrier_uptake && !protocol.internalization_imaging_verified
+        push!(blockers, "nanocarrier_uptake_surface_vs_internalization_unverified")
+    end
+
+    is_synth = protocol.data_provenance == :synthetic_simulation
+    emp_ready = isempty(blockers) && proto_eval.empirical_generalization_established
+    claim_level = if is_synth
+        :synthetic_software_benchmark_only
+    elseif emp_ready
+        :empirical_heldout_generalization_verified
+    else
+        :preliminary_empirical_requires_controls
+    end
+
+    return (
+        empirically_generalizable = emp_ready,
+        claim_level = claim_level,
+        synthetic_benchmark_only = is_synth,
+        accepted_accuracy = report.accepted_accuracy,
+        expected_calibration_error = report.expected_calibration_error,
+        feature_psi_drift = psi_val,
+        internalization_surface_warning = proto_eval.surface_association_only_warning,
+        blocking_reasons = blockers
+    )
+end
+
 end # module CellClassifier
 
 
@@ -2167,6 +2320,7 @@ module MicrofluidicBridge
 using Statistics
 using Printf
 import SHA
+import ..ENGINE_VERSION
 import ..FCSIO: FCSDataset, SensorTrajectoryRow, n_events
 import ..CytometryAnalysis: GatingHierarchy, GatePopulationSummary, export_gating_hierarchy_json
 import ..CellClassifier: SingleCellPrediction, ClassifierValidationReport
@@ -2175,11 +2329,14 @@ import ..FlowCytometryObservationModel:
     VALID_STAKEHOLDER_TRACKS, VALID_EPISTEMIC_STATUSES,
     CellStatePrediction, GateCalibration, FCMSampleSummary,
     ConcentrationUncertainty, OpenFOAMTransportSnap, PHREEQCSpeciationSnap,
+    OpenFOAMMeshExchange, PHREEQCSpeciesAdapter, EmpiricalValidationProtocol,
     EpistemicQuantity, ProductionAuditRecord,
     expected_cell_events, predicted_gate_probabilities, absolute_cells_per_ml,
     verify_concentration_likelihood_consistency, joint_loglikelihood,
     recover_latent_state_mle, concentration_uncertainty,
-    validate_solver_observation_alignment, build_production_audit_record
+    validate_solver_observation_alignment, build_production_audit_record,
+    summarize_openfoam_mesh_to_snap, summarize_phreeqc_adapter_to_snap,
+    evaluate_empirical_generalization_readiness
 
 export MicrofluidicAssayCondition, MicroporeTransitEvent,
        JoinedMicrofluidicCellRecord, MicrofluidicBridgeReport,
@@ -2468,6 +2625,9 @@ function bridge_to_observation_model(
         state_prediction::Union{Nothing,CellStatePrediction}=nothing,
         transport_snap::Union{Nothing,OpenFOAMTransportSnap}=nothing,
         chemistry_snap::Union{Nothing,PHREEQCSpeciationSnap}=nothing,
+        mesh_transport::Union{Nothing,OpenFOAMMeshExchange}=nothing,
+        species_chemistry::Union{Nothing,PHREEQCSpeciesAdapter}=nothing,
+        empirical_protocol::Union{Nothing,EmpiricalValidationProtocol}=nothing,
         vessel_id::AbstractString="CHIP-01",
         time_h::Real=1.0,
         track::Symbol=:track1_nanobio,
@@ -2475,10 +2635,13 @@ function bridge_to_observation_model(
         heldout_validated::Bool=true)
     !isempty(joined_records) || throw(ArgumentError("joined_records must be non-empty"))
 
-    if transport_snap !== nothing || chemistry_snap !== nothing
+    if transport_snap !== nothing || chemistry_snap !== nothing || mesh_transport !== nothing || species_chemistry !== nothing
         validate_solver_observation_alignment(
             sample_summary, vessel_id, time_h;
-            transport=transport_snap, chemistry=chemistry_snap
+            transport=transport_snap,
+            chemistry=chemistry_snap,
+            mesh_transport=mesh_transport,
+            species_chemistry=species_chemistry
         )
     end
 
@@ -2536,13 +2699,34 @@ function bridge_to_observation_model(
         EpistemicQuantity("latent_concentration_cells_per_ml", c_abs, :predicted,
                           "MLE concentration via FlowCytometryObservationModel"),
     ]
+    if mesh_transport !== nothing
+        push!(quantities, EpistemicQuantity(
+            "openfoam_mesh_exchange_$(mesh_transport.field_name)",
+            mean(mesh_transport.internal_field),
+            mesh_transport.epistemic_status,
+            "OpenFOAM mesh field exchange ($(mesh_transport.mesh_id))"
+        ))
+    end
+    if species_chemistry !== nothing
+        push!(quantities, EpistemicQuantity(
+            "phreeqc_species_ph",
+            species_chemistry.pH,
+            species_chemistry.epistemic_status,
+            "PHREEQC full-species geochemical snapshot"
+        ))
+    end
+    effective_heldout = empirical_protocol === nothing ? heldout_validated :
+        (heldout_validated && evaluate_empirical_generalization_readiness(
+            empirical_protocol; heldout_run_accuracy=0.90
+        ).empirical_generalization_established)
+
     audit = build_production_audit_record(
         track = track,
         input_sha256 = digest,
         quantities = quantities,
         sample = sample_summary,
         calibration = calibration,
-        heldout_validated = heldout_validated
+        heldout_validated = effective_heldout
     )
 
     return MicrofluidicBridgeReport(
@@ -2590,7 +2774,7 @@ function export_reproducible_analysis_bundle(
 
     open(summary_json_path, "w") do io
         println(io, "{")
-        @printf(io, "  \"engine_version\": \"%s\",\n", "0.2.0")
+        @printf(io, "  \"engine_version\": \"%s\",\n", ENGINE_VERSION)
         @printf(io, "  \"observation_model_version\": \"%s\",\n", MODEL_ADAPTER_VERSION)
         @printf(io, "  \"source_fcs_sha256\": \"%s\",\n", dataset.provenance.sha256)
         @printf(io, "  \"sample_id\": \"%s\",\n", dataset.provenance.sample_id)
@@ -2967,13 +3151,1027 @@ end
 
 end # module SharedVisualizationPhysics
 
+
+# ===========================================================================
+# MODULE 6: BiofilmMultiphysics (Milestones M3 & M4)
+# Responsibility: Independently switchable constitutive and regulatory layers
+# grounded in the October 16-30, 2026 biofilm and quorum-sensing literature:
+# - M3 (Biofilm constitutive layer):
+#   1. Matrix composition M(x,t) = {PGA, EPS, Curli, Cellulose} with PNAS Oct 2026
+#      hydration/swelling pressure, composite modulus, and thin-film wrinkling
+#      buckling stress threshold.
+#   2. Spatially heterogeneous composition-, size-, and charge-dependent
+#      effective diffusivity D_eff(x,t; M, r_probe, q_probe) (UPEC npj Biofilms Oct 2026).
+#   3. Localized chemical/bioelectronic source term S_i(x,t) and conservative 1D
+#      finite-volume reactive transport solver.
+# - M4 (Regulatory & physiological dynamics):
+#   1. Decoupled intracellular Droop nutrient quota Q vs extracellular nutrient N.
+#   2. Nutrient- and stress-dependent agr / RNAIII / alpha-PSM / EV biogenesis
+#      dynamics (mBio Oct 2026) and configurable QS network topologies
+#      (:staphylococcus_agr_rnaiii_psm, :pseudomonas_pqse_rhlr, :pseudomonas_lasi_lasr).
+#   3. Electrokinetic / ROS abiotic AHL signal degradation vs biological quorum
+#      quenching and intact-biofilm matrix shielding (Oct 17, 2026 study).
+#   4. Three-mode polymicrobial QS crosstalk separating direct signal perception,
+#      chemical-effector mediation, and environment-mediated pH/redox modification
+#      (Critical Reviews in Microbiology Oct 2026).
+#   5. Clonal S. aureus metabolic subpopulation heterogeneity separating
+#      fructose-consuming fruA/fruK cell-wall-thickened vancomycin-tolerant cells,
+#      metabolically reduced cells, and oxidative-stress-repair cells (ISME J Oct 2026).
+# ===========================================================================
+module BiofilmMultiphysics
+
+using LinearAlgebra
+using Statistics
+import ..FlowCytometryObservationModel: VALID_EPISTEMIC_STATUSES, CellStatePrediction
+
+export VALID_QS_TOPOLOGIES, VALID_MORPHOLOGICAL_PHASES,
+       BiofilmHypothesisSwitches,
+       BiofilmMatrixComposition, total_matrix_biopolymer_kg_m3,
+       ThinFilmSwellingMechanicsSpec, evaluate_biofilm_swelling_mechanics,
+       HeterogeneousDiffusivitySpec, compute_effective_diffusivity,
+       compute_spatial_diffusivity_field,
+       LocalizedDeliverySourceSpec, evaluate_localized_source_term,
+       solve_1d_reactive_transport_biofilm,
+       QSRegulatoryTopology,
+       ElectrokineticQSSpec, evaluate_qs_signal_degradation,
+       PolymicrobialCrosstalkSpec, evaluate_polymicrobial_crosstalk,
+       BiofilmRegulatoryState, BiofilmRegulatoryParams,
+       step_biofilm_regulatory_ode, simulate_biofilm_regulatory_trajectory,
+       subpopulations_to_fcm_state
+
+const VALID_QS_TOPOLOGIES = (
+    :staphylococcus_agr_rnaiii_psm,
+    :pseudomonas_pqse_rhlr,
+    :pseudomonas_lasi_lasr,
+)
+
+const VALID_MORPHOLOGICAL_PHASES = (
+    :flat_unswollen,
+    :swollen_smooth_gel,
+    :wrinkled_buckled_colony,
+    :rigid_compact_mat,
+)
+
+"""
+Independently switchable mechanistic hypothesis flags for M3 and M4 so each
+constitutive or regulatory submodel can be toggled and benchmarked without
+rewriting core solver interfaces.
+"""
+struct BiofilmHypothesisSwitches
+    enable_pga_swelling_mechanics::Bool
+    enable_heterogeneous_matrix_diffusion::Bool
+    enable_localized_bioelectronic_delivery::Bool
+    enable_droop_intracellular_quota::Bool
+    enable_nutrient_stress_qs_ev::Bool
+    enable_electrokinetic_ahl_degradation::Bool
+    enable_polymicrobial_qs_crosstalk::Bool
+    enable_subpopulation_heterogeneity::Bool
+
+    function BiofilmHypothesisSwitches(;
+            enable_pga_swelling_mechanics::Bool=true,
+            enable_heterogeneous_matrix_diffusion::Bool=true,
+            enable_localized_bioelectronic_delivery::Bool=true,
+            enable_droop_intracellular_quota::Bool=true,
+            enable_nutrient_stress_qs_ev::Bool=true,
+            enable_electrokinetic_ahl_degradation::Bool=true,
+            enable_polymicrobial_qs_crosstalk::Bool=true,
+            enable_subpopulation_heterogeneity::Bool=true)
+        new(
+            enable_pga_swelling_mechanics,
+            enable_heterogeneous_matrix_diffusion,
+            enable_localized_bioelectronic_delivery,
+            enable_droop_intracellular_quota,
+            enable_nutrient_stress_qs_ev,
+            enable_electrokinetic_ahl_degradation,
+            enable_polymicrobial_qs_crosstalk,
+            enable_subpopulation_heterogeneity
+        )
+    end
+end
+
+"""
+Local biofilm extracellular polymeric matrix composition
+`M(x,t) = {PGA, EPS, Curli, Cellulose}` in kg/m^3.
+"""
+struct BiofilmMatrixComposition
+    pga_kg_m3::Float64
+    eps_kg_m3::Float64
+    curli_kg_m3::Float64
+    cellulose_kg_m3::Float64
+    porosity::Float64
+    epistemic_status::Symbol
+
+    function BiofilmMatrixComposition(;
+            pga_kg_m3::Real=12.0,
+            eps_kg_m3::Real=25.0,
+            curli_kg_m3::Real=8.0,
+            cellulose_kg_m3::Real=5.0,
+            porosity::Real=0.78,
+            epistemic_status::Symbol=:assumed)
+        epistemic_status in VALID_EPISTEMIC_STATUSES ||
+            throw(ArgumentError("epistemic_status must be one of $(VALID_EPISTEMIC_STATUSES)"))
+        pga = Float64(pga_kg_m3)
+        eps = Float64(eps_kg_m3)
+        cur = Float64(curli_kg_m3)
+        cel = Float64(cellulose_kg_m3)
+        por = Float64(porosity)
+        all(x -> isfinite(x) && x >= 0.0, (pga, eps, cur, cel)) ||
+            throw(ArgumentError("matrix biopolymer concentrations must be finite and >= 0"))
+        0.05 <= por <= 0.999 ||
+            throw(ArgumentError("porosity must be in [0.05, 0.999]"))
+        new(pga, eps, cur, cel, por, epistemic_status)
+    end
+end
+
+function total_matrix_biopolymer_kg_m3(m::BiofilmMatrixComposition)
+    return m.pga_kg_m3 + m.eps_kg_m3 + m.curli_kg_m3 + m.cellulose_kg_m3
+end
+
+struct ThinFilmSwellingMechanicsSpec
+    film_thickness_um::Float64
+    substrate_modulus_pa::Float64
+    poisson_ratio::Float64
+    external_osmotic_pressure_pa::Float64
+    pga_osmotic_coeff_pa_m3_kg::Float64
+    eps_osmotic_coeff_pa_m3_kg::Float64
+    basal_gel_modulus_pa::Float64
+    eps_modulus_coeff_pa_m3_kg::Float64
+    curli_modulus_coeff_pa_m3_kg::Float64
+    cellulose_modulus_coeff_pa_m3_kg::Float64
+
+    function ThinFilmSwellingMechanicsSpec(;
+            film_thickness_um::Real=45.0,
+            substrate_modulus_pa::Real=1800.0,
+            poisson_ratio::Real=0.45,
+            external_osmotic_pressure_pa::Real=500.0,
+            pga_osmotic_coeff_pa_m3_kg::Real=420.0,
+            eps_osmotic_coeff_pa_m3_kg::Real=55.0,
+            basal_gel_modulus_pa::Real=400.0,
+            eps_modulus_coeff_pa_m3_kg::Real=110.0,
+            curli_modulus_coeff_pa_m3_kg::Real=680.0,
+            cellulose_modulus_coeff_pa_m3_kg::Real=340.0)
+        h = Float64(film_thickness_um)
+        es = Float64(substrate_modulus_pa)
+        nu = Float64(poisson_ratio)
+        pi_ext = Float64(external_osmotic_pressure_pa)
+        c_pga = Float64(pga_osmotic_coeff_pa_m3_kg)
+        c_eps = Float64(eps_osmotic_coeff_pa_m3_kg)
+        e0 = Float64(basal_gel_modulus_pa)
+        k_eps = Float64(eps_modulus_coeff_pa_m3_kg)
+        k_cur = Float64(curli_modulus_coeff_pa_m3_kg)
+        k_cel = Float64(cellulose_modulus_coeff_pa_m3_kg)
+        h > 0 && es > 0 && (0.0 <= nu < 0.5) && pi_ext >= 0 &&
+            c_pga >= 0 && c_eps >= 0 && e0 > 0 && k_eps >= 0 && k_cur >= 0 && k_cel >= 0 ||
+            throw(ArgumentError("invalid parameters in ThinFilmSwellingMechanicsSpec"))
+        new(h, es, nu, pi_ext, c_pga, c_eps, e0, k_eps, k_cur, k_cel)
+    end
+end
+
+"""
+Evaluate biofilm hydration, osmotic swelling pressure, composite elastic modulus,
+and Euler-Foppl thin-film wrinkling instability (PNAS Oct 2026: PGA drives water
+absorption and colony swelling expansion, whereas EPS and amyloid curli control
+elastic modulus and wrinkling morphology).
+"""
+function evaluate_biofilm_swelling_mechanics(
+        comp::BiofilmMatrixComposition,
+        spec::ThinFilmSwellingMechanicsSpec=ThinFilmSwellingMechanicsSpec();
+        switches::BiofilmHypothesisSwitches=BiofilmHypothesisSwitches())
+    E_film = spec.basal_gel_modulus_pa +
+             spec.eps_modulus_coeff_pa_m3_kg * comp.eps_kg_m3 +
+             spec.curli_modulus_coeff_pa_m3_kg * comp.curli_kg_m3 +
+             spec.cellulose_modulus_coeff_pa_m3_kg * comp.cellulose_kg_m3
+
+    if !switches.enable_pga_swelling_mechanics
+        return (
+            hydration_fraction = comp.porosity,
+            swelling_pressure_pa = 0.0,
+            composite_modulus_pa = E_film,
+            compressive_stress_pa = 0.0,
+            critical_wrinkling_stress_pa = E_film,
+            wrinkling_index = 0.0,
+            wrinkled = false,
+            wrinkle_wavelength_um = 0.0,
+            morphological_phase = :flat_unswollen
+        )
+    end
+
+    pi_pga = spec.pga_osmotic_coeff_pa_m3_kg * comp.pga_kg_m3
+    pi_eps = spec.eps_osmotic_coeff_pa_m3_kg * comp.eps_kg_m3
+    pi_swell = max(0.0, pi_pga + pi_eps - spec.external_osmotic_pressure_pa)
+
+    # Equilibrium swelling stretch and hydration volume fraction
+    swelling_strain = pi_swell / (E_film + pi_swell + 1000.0)
+    hydration = clamp(
+        0.52 + 0.43 * (pi_pga / (pi_pga + 1800.0)) - 0.08 * (comp.curli_kg_m3 / (comp.curli_kg_m3 + 25.0)),
+        0.35, 0.98
+    )
+
+    # Biaxial compressive stress generated by constrained lateral swelling on substrate
+    sigma_comp = (E_film / (1.0 - spec.poisson_ratio)) * swelling_strain
+
+    # Critical thin-film buckling stress on compliant agar/tissue substrate
+    nu_factor = 3.0 * (1.0 - spec.poisson_ratio^2)
+    stiffness_ratio = (nu_factor * spec.substrate_modulus_pa) / max(E_film, 1e-6)
+    sigma_crit = (E_film / (4.0 * (1.0 - spec.poisson_ratio^2))) * (stiffness_ratio ^ (2.0 / 3.0))
+
+    wrinkling_idx = sigma_comp / max(sigma_crit, 1e-9)
+    is_wrinkled = wrinkling_idx >= 1.0 && (comp.eps_kg_m3 + comp.curli_kg_m3 >= 4.0)
+    wavelength_um = 2.0 * pi * spec.film_thickness_um * ((E_film / max(nu_factor * spec.substrate_modulus_pa, 1e-6)) ^ (1.0 / 3.0))
+
+    phase = if comp.pga_kg_m3 < 1.0 && (comp.curli_kg_m3 + comp.eps_kg_m3 >= 10.0)
+        :rigid_compact_mat
+    elseif is_wrinkled
+        :wrinkled_buckled_colony
+    elseif pi_swell > 400.0
+        :swollen_smooth_gel
+    else
+        :flat_unswollen
+    end
+
+    return (
+        hydration_fraction = hydration,
+        swelling_pressure_pa = pi_swell,
+        composite_modulus_pa = E_film,
+        compressive_stress_pa = sigma_comp,
+        critical_wrinkling_stress_pa = sigma_crit,
+        wrinkling_index = wrinkling_idx,
+        wrinkled = is_wrinkled,
+        wrinkle_wavelength_um = wavelength_um,
+        morphological_phase = phase
+    )
+end
+
+struct HeterogeneousDiffusivitySpec
+    aqueous_diffusivity_m2_s::Float64
+    probe_radius_nm::Float64
+    probe_charge_valence::Float64
+    ionic_strength_mol_l::Float64
+    reference_mesh_size_nm::Float64
+    curli_sieving_coeff::Float64
+    charge_binding_coeff::Float64
+
+    function HeterogeneousDiffusivitySpec(;
+            aqueous_diffusivity_m2_s::Real=6.5e-10,
+            probe_radius_nm::Real=2.5,
+            probe_charge_valence::Real=1.0,
+            ionic_strength_mol_l::Real=0.15,
+            reference_mesh_size_nm::Real=45.0,
+            curli_sieving_coeff::Real=0.085,
+            charge_binding_coeff::Real=0.045)
+        d0 = Float64(aqueous_diffusivity_m2_s)
+        rp = Float64(probe_radius_nm)
+        qp = Float64(probe_charge_valence)
+        ion = Float64(ionic_strength_mol_l)
+        xi0 = Float64(reference_mesh_size_nm)
+        cs = Float64(curli_sieving_coeff)
+        cb = Float64(charge_binding_coeff)
+        d0 > 0 && rp > 0 && isfinite(qp) && ion > 0 && xi0 > 0 && cs >= 0 && cb >= 0 ||
+            throw(ArgumentError("invalid physical parameters in HeterogeneousDiffusivitySpec"))
+        new(d0, rp, qp, ion, xi0, cs, cb)
+    end
+end
+
+"""
+Compute local composition-, size-, and charge-dependent effective diffusivity
+`D_eff(x,t; M, r_probe, q_probe)` inside a heterogeneous biofilm matrix
+(UPEC npj Biofilms Oct 2026: amyloid curli governs nanoporous steric sieving,
+while charged EPS/PGA govern electrostatic Donnan/binding retardation).
+"""
+function compute_effective_diffusivity(
+        comp::BiofilmMatrixComposition,
+        spec::HeterogeneousDiffusivitySpec=HeterogeneousDiffusivitySpec();
+        switches::BiofilmHypothesisSwitches=BiofilmHypothesisSwitches())
+    if !switches.enable_heterogeneous_matrix_diffusion
+        d_hom = spec.aqueous_diffusivity_m2_s * comp.porosity
+        return (
+            d_eff_m2_s = d_hom,
+            relative_diffusivity = comp.porosity,
+            steric_factor = comp.porosity,
+            curli_sieving_factor = 1.0,
+            electrostatic_factor = 1.0,
+            effective_mesh_size_nm = spec.reference_mesh_size_nm
+        )
+    end
+
+    tot_mass = total_matrix_biopolymer_kg_m3(comp)
+    phi_poly = clamp(tot_mass / 1100.0, 0.0, 0.75)
+
+    # Effective correlation mesh size xi decreases with curli and total polymer density
+    xi_nm = spec.reference_mesh_size_nm / (1.0 + 0.035 * tot_mass + 0.14 * comp.curli_kg_m3)
+    # Ogston-like steric hindrance factor
+    f_steric = comp.porosity * exp(-((spec.probe_radius_nm / max(xi_nm, 0.25)) ^ 1.15) * (1.0 + 2.5 * phi_poly))
+    # Curli amyloid fibril size-selective sieving
+    f_curli = exp(-spec.curli_sieving_coeff * comp.curli_kg_m3 * (spec.probe_radius_nm / 2.0))
+    # Electrostatic binding / Donnan retardation (anionic PGA + EPS retard cationic probes, screened by ionic strength)
+    anionic_density = comp.pga_kg_m3 + 0.65 * comp.eps_kg_m3
+    debye_screening = 1.0 / (1.0 + sqrt(spec.ionic_strength_mol_l / 0.05))
+    charge_interaction = spec.probe_charge_valence > 0 ?
+        spec.charge_binding_coeff * spec.probe_charge_valence * anionic_density * debye_screening :
+        0.18 * spec.charge_binding_coeff * abs(spec.probe_charge_valence) * anionic_density * debye_screening
+    f_electro = 1.0 / (1.0 + charge_interaction)
+
+    rel_d = clamp(f_steric * f_curli * f_electro, 1e-5, 1.0)
+    return (
+        d_eff_m2_s = spec.aqueous_diffusivity_m2_s * rel_d,
+        relative_diffusivity = rel_d,
+        steric_factor = f_steric,
+        curli_sieving_factor = f_curli,
+        electrostatic_factor = f_electro,
+        effective_mesh_size_nm = xi_nm
+    )
+end
+
+function compute_spatial_diffusivity_field(
+        compositions::AbstractVector{BiofilmMatrixComposition},
+        spec::HeterogeneousDiffusivitySpec=HeterogeneousDiffusivitySpec();
+        switches::BiofilmHypothesisSwitches=BiofilmHypothesisSwitches())
+    !isempty(compositions) || throw(ArgumentError("compositions must be non-empty"))
+    evals = [compute_effective_diffusivity(c, spec; switches=switches) for c in compositions]
+    d_vec = [e.d_eff_m2_s for e in evals]
+    rel_vec = [e.relative_diffusivity for e in evals]
+    xi_vec = [e.effective_mesh_size_nm for e in evals]
+    return (
+        d_eff_m2_s = d_vec,
+        relative_diffusivity = rel_vec,
+        effective_mesh_size_nm = xi_vec,
+        min_d_eff_m2_s = minimum(d_vec),
+        max_d_eff_m2_s = maximum(d_vec),
+        heterogeneity_ratio = maximum(d_vec) / max(minimum(d_vec), 1e-20)
+    )
+end
+
+struct LocalizedDeliverySourceSpec
+    actuator_position_m::Float64
+    spatial_spread_m::Float64
+    peak_release_rate_mol_m3_s::Float64
+    pulse_start_s::Float64
+    pulse_duration_s::Float64
+    duty_cycle::Float64
+    carrier_type::Symbol
+
+    function LocalizedDeliverySourceSpec(;
+            actuator_position_m::Real=50.0e-6,
+            spatial_spread_m::Real=15.0e-6,
+            peak_release_rate_mol_m3_s::Real=0.25,
+            pulse_start_s::Real=0.0,
+            pulse_duration_s::Real=120.0,
+            duty_cycle::Real=1.0,
+            carrier_type::Symbol=:bioelectronic_ion_pump)
+        pos = Float64(actuator_position_m)
+        sp = Float64(spatial_spread_m)
+        pk = Float64(peak_release_rate_mol_m3_s)
+        ps = Float64(pulse_start_s)
+        pd = Float64(pulse_duration_s)
+        dc = Float64(duty_cycle)
+        isfinite(pos) && sp > 0 && pk >= 0 && ps >= 0 && pd > 0 && (0.0 <= dc <= 1.0) ||
+            throw(ArgumentError("invalid parameters in LocalizedDeliverySourceSpec"))
+        new(pos, sp, pk, ps, pd, dc, carrier_type)
+    end
+end
+
+function evaluate_localized_source_term(
+        x_m::Real,
+        t_s::Real,
+        spec::LocalizedDeliverySourceSpec;
+        switches::BiofilmHypothesisSwitches=BiofilmHypothesisSwitches())
+    if !switches.enable_localized_bioelectronic_delivery
+        return 0.0
+    end
+    t = Float64(t_s)
+    if t < spec.pulse_start_s || t > (spec.pulse_start_s + spec.pulse_duration_s)
+        return 0.0
+    end
+    dx = Float64(x_m) - spec.actuator_position_m
+    spatial_env = exp(-0.5 * (dx / spec.spatial_spread_m)^2)
+    return spec.peak_release_rate_mol_m3_s * spec.duty_cycle * spatial_env
+end
+
+"""
+Solve conservative 1D finite-volume reactive transport across a spatially
+heterogeneous biofilm domain:
+  dC/dt = d/dx (D_eff(x) dC/dx) - k_uptake C + S(x,t)
+with zero-flux or prescribed-flux boundaries and strict mass-balance auditing.
+"""
+function solve_1d_reactive_transport_biofilm(;
+        x_grid_m::AbstractVector{<:Real},
+        times_s::AbstractVector{<:Real},
+        compositions::AbstractVector{BiofilmMatrixComposition},
+        diff_spec::HeterogeneousDiffusivitySpec=HeterogeneousDiffusivitySpec(),
+        source_spec::Union{Nothing,LocalizedDeliverySourceSpec}=nothing,
+        initial_concentration_mol_m3::AbstractVector{<:Real}=zeros(Float64, length(x_grid_m)),
+        first_order_uptake_s::Real=0.0,
+        boundary_left_flux_mol_m2_s::Real=0.0,
+        boundary_right_flux_mol_m2_s::Real=0.0,
+        switches::BiofilmHypothesisSwitches=BiofilmHypothesisSwitches())
+    n = length(x_grid_m)
+    n >= 4 || throw(ArgumentError("x_grid_m must have at least 4 finite-volume cells"))
+    length(compositions) == n && length(initial_concentration_mol_m3) == n ||
+        throw(ArgumentError("x_grid_m, compositions, and initial_concentration_mol_m3 must have equal length"))
+    !isempty(times_s) && issorted(times_s) && first(times_s) >= 0 ||
+        throw(ArgumentError("times_s must be non-empty, sorted, and >= 0"))
+    k_up = Float64(first_order_uptake_s)
+    k_up >= 0 || throw(ArgumentError("first_order_uptake_s must be >= 0"))
+
+    x_vec = Float64.(x_grid_m)
+    issorted(x_vec; lt=isless) || throw(ArgumentError("x_grid_m must be strictly increasing"))
+    dx = (x_vec[end] - x_vec[1]) / (n - 1)
+    for i in 1:(n - 1)
+        isapprox(x_vec[i + 1] - x_vec[i], dx; rtol=1e-4, atol=1e-12) ||
+            throw(ArgumentError("x_grid_m must be uniformly spaced for 1D FV conservation"))
+    end
+
+    diff_field = compute_spatial_diffusivity_field(compositions, diff_spec; switches=switches)
+    D_cell = diff_field.d_eff_m2_s
+    D_face = zeros(Float64, n + 1)
+    for i in 1:(n - 1)
+        D_face[i + 1] = (2.0 * D_cell[i] * D_cell[i + 1]) / max(D_cell[i] + D_cell[i + 1], 1e-24)
+    end
+
+    c = Float64.(initial_concentration_mol_m3)
+    all(v -> isfinite(v) && v >= 0, c) ||
+        throw(ArgumentError("initial_concentration_mol_m3 must be finite and >= 0"))
+
+    initial_mass = sum(c) * dx
+    cum_source = 0.0
+    cum_uptake = 0.0
+    cum_boundary = 0.0
+
+    rate_diff = 2.2 * maximum(D_cell) / (dx * dx)
+    dt_max = 0.40 / max(rate_diff + k_up, 1e-9)
+
+    profiles = Vector{Vector{Float64}}(undef, length(times_s))
+    t_cur = 0.0
+    dc = zeros(Float64, n)
+    f_left = Float64(boundary_left_flux_mol_m2_s)
+    f_right = Float64(boundary_right_flux_mol_m2_s)
+
+    for (snap_idx, t_target_real) in enumerate(times_s)
+        t_target = Float64(t_target_real)
+        while t_cur < t_target - 1e-12
+            dt = min(dt_max, t_target - t_cur)
+            t_mid = t_cur + 0.5 * dt
+            fill!(dc, 0.0)
+
+            # Internal diffusive fluxes
+            for i in 1:(n - 1)
+                flx = -D_face[i + 1] * (c[i + 1] - c[i]) / dx
+                dc[i]     -= flx / dx
+                dc[i + 1] += flx / dx
+            end
+            # Boundary fluxes (positive f_left enters cell 1; positive f_right leaves cell n)
+            dc[1] += f_left / dx
+            dc[n] -= f_right / dx
+            cum_boundary += (f_left - f_right) * dt
+
+            for i in 1:n
+                src_i = source_spec === nothing ? 0.0 :
+                    evaluate_localized_source_term(x_vec[i], t_mid, source_spec; switches=switches)
+                up_i = k_up * c[i]
+                dc[i] += src_i - up_i
+                cum_source += src_i * dx * dt
+                cum_uptake += up_i * dx * dt
+                c[i] = max(0.0, c[i] + dt * dc[i])
+            end
+            t_cur += dt
+        end
+        profiles[snap_idx] = copy(c)
+    end
+
+    final_mass = sum(c) * dx
+    expected_final_mass = initial_mass + cum_source + cum_boundary - cum_uptake
+    mass_err = abs(final_mass - expected_final_mass) / max(initial_mass + cum_source + abs(cum_boundary), 1e-15)
+
+    return (
+        x_grid_m = x_vec,
+        times_s = Float64.(times_s),
+        diffusivity_field_m2_s = D_cell,
+        profiles_mol_m3 = profiles,
+        initial_mass_mol_m2 = initial_mass,
+        final_mass_mol_m2 = final_mass,
+        cumulative_source_mol_m2 = cum_source,
+        cumulative_uptake_mol_m2 = cum_uptake,
+        cumulative_boundary_mol_m2 = cum_boundary,
+        relative_mass_balance_error = mass_err,
+        mass_conserved = mass_err <= 1e-6
+    )
+end
+
+# ---------------------------------------------------------------------------
+# Milestone M4: Regulatory & physiological dynamics
+# ---------------------------------------------------------------------------
+
+struct QSRegulatoryTopology
+    topology_id::Symbol
+    autoinducer_name::String
+    receptor_name::String
+    effector_names::Vector{String}
+    activation_threshold_um::Float64
+    hill_coefficient::Float64
+    pqse_chaperone_coupling::Float64
+    rnaiii_psm_decoupled::Bool
+
+    function QSRegulatoryTopology(;
+            topology_id::Symbol=:staphylococcus_agr_rnaiii_psm,
+            autoinducer_name::AbstractString="AIP-I",
+            receptor_name::AbstractString="AgrC-AgrA",
+            effector_names::AbstractVector{<:AbstractString}=["RNAIII", "alpha-PSM", "EV"],
+            activation_threshold_um::Real=0.45,
+            hill_coefficient::Real=2.2,
+            pqse_chaperone_coupling::Real=0.0,
+            rnaiii_psm_decoupled::Bool=true)
+        topology_id in VALID_QS_TOPOLOGIES ||
+            throw(ArgumentError("topology_id must be one of $(VALID_QS_TOPOLOGIES)"))
+        k_th = Float64(activation_threshold_um)
+        nh = Float64(hill_coefficient)
+        pq = Float64(pqse_chaperone_coupling)
+        k_th > 0 && nh >= 1.0 && (0.0 <= pq <= 2.0) ||
+            throw(ArgumentError("invalid parameters in QSRegulatoryTopology"))
+        new(
+            topology_id,
+            String(strip(autoinducer_name)),
+            String(strip(receptor_name)),
+            [String(strip(e)) for e in effector_names],
+            k_th, nh, pq, rnaiii_psm_decoupled
+        )
+    end
+end
+
+struct ElectrokineticQSSpec
+    electric_field_v_m::Float64
+    ros_generation_factor::Float64
+    k_electric_ros_s::Float64
+    k_enzymatic_qq_s::Float64
+    matrix_shielding_coeff::Float64
+
+    function ElectrokineticQSSpec(;
+            electric_field_v_m::Real=1500.0,
+            ros_generation_factor::Real=1.0,
+            k_electric_ros_s::Real=0.018,
+            k_enzymatic_qq_s::Real=0.004,
+            matrix_shielding_coeff::Real=0.065)
+        ef = Float64(electric_field_v_m)
+        rg = Float64(ros_generation_factor)
+        ke = Float64(k_electric_ros_s)
+        kq = Float64(k_enzymatic_qq_s)
+        ms = Float64(matrix_shielding_coeff)
+        ef >= 0 && rg >= 0 && ke >= 0 && kq >= 0 && ms >= 0 ||
+            throw(ArgumentError("invalid parameters in ElectrokineticQSSpec"))
+        new(ef, rg, ke, kq, ms)
+    end
+end
+
+"""
+Evaluate quorum-sensing AHL/autoinducer signal removal separating abiotic
+electric-field / ROS degradation from biological quorum quenching, and accounting
+for protective shielding by an intact biofilm matrix vs cell-free supernatant
+(grounded in the Oct 17, 2026 electrokinetic AHL disruption study).
+"""
+function evaluate_qs_signal_degradation(
+        signal_concentration_um::Real,
+        spec::ElectrokineticQSSpec=ElectrokineticQSSpec();
+        intact_biofilm_matrix::Union{Nothing,BiofilmMatrixComposition}=nothing,
+        switches::BiofilmHypothesisSwitches=BiofilmHypothesisSwitches())
+    sig = Float64(signal_concentration_um)
+    sig >= 0 || throw(ArgumentError("signal_concentration_um must be >= 0"))
+
+    shielding = if intact_biofilm_matrix === nothing
+        1.0
+    else
+        tot_m = total_matrix_biopolymer_kg_m3(intact_biofilm_matrix)
+        1.0 / (1.0 + spec.matrix_shielding_coeff * tot_m)
+    end
+
+    field_scale = (spec.electric_field_v_m / 1000.0) * spec.ros_generation_factor
+    k_abiotic = switches.enable_electrokinetic_ahl_degradation ?
+        spec.k_electric_ros_s * field_scale * shielding : 0.0
+    k_biotic = spec.k_enzymatic_qq_s * (0.4 + 0.6 * shielding)
+    k_total = k_abiotic + k_biotic
+
+    return (
+        abiotic_electric_ros_rate_s = k_abiotic,
+        biotic_quorum_quenching_rate_s = k_biotic,
+        total_degradation_rate_s = k_total,
+        removal_flux_um_s = k_total * sig,
+        matrix_transmission_factor = shielding,
+        supernatant_vs_biofilm_attenuation = shielding
+    )
+end
+
+struct PolymicrobialCrosstalkSpec
+    direct_receptor_competition_coeff::Float64
+    chemical_effector_inhibition_coeff::Float64
+    alkaline_lactonolysis_coeff::Float64
+    redox_modulation_coeff::Float64
+
+    function PolymicrobialCrosstalkSpec(;
+            direct_receptor_competition_coeff::Real=0.35,
+            chemical_effector_inhibition_coeff::Real=0.45,
+            alkaline_lactonolysis_coeff::Real=0.28,
+            redox_modulation_coeff::Real=0.15)
+        drc = Float64(direct_receptor_competition_coeff)
+        cei = Float64(chemical_effector_inhibition_coeff)
+        alc = Float64(alkaline_lactonolysis_coeff)
+        rmc = Float64(redox_modulation_coeff)
+        all(x -> isfinite(x) && x >= 0.0, (drc, cei, alc, rmc)) ||
+            throw(ArgumentError("PolymicrobialCrosstalkSpec coefficients must be finite and >= 0"))
+        new(drc, cei, alc, rmc)
+    end
+end
+
+"""
+Evaluate polymicrobial quorum-sensing crosstalk across three distinct mechanistic
+modes (Critical Reviews in Microbiology, Oct 2026):
+1. Direct signal perception (competitive/allosteric receptor modulation by non-cognate signals).
+2. Chemical-effector mediation (HQNO, pyocyanin, or antimicrobial effector interference).
+3. Environment-mediated modification (alkaline pH lactonolysis of AHLs and redox shift).
+"""
+function evaluate_polymicrobial_crosstalk(
+        spec::PolymicrobialCrosstalkSpec=PolymicrobialCrosstalkSpec();
+        cognate_signal_um::Real=1.0,
+        non_cognate_signal_um::Real=0.0,
+        chemical_effector_um::Real=0.0,
+        local_ph::Real=7.0,
+        local_eh_mv::Real=100.0,
+        switches::BiofilmHypothesisSwitches=BiofilmHypothesisSwitches())
+    cog = Float64(cognate_signal_um)
+    noncog = Float64(non_cognate_signal_um)
+    chem = Float64(chemical_effector_um)
+    ph = Float64(local_ph)
+    eh = Float64(local_eh_mv)
+    cog >= 0 && noncog >= 0 && chem >= 0 && (0.0 <= ph <= 14.0) && isfinite(eh) ||
+        throw(ArgumentError("invalid physical inputs in evaluate_polymicrobial_crosstalk"))
+
+    if !switches.enable_polymicrobial_qs_crosstalk
+        return (
+            direct_signal_perception_factor = 1.0,
+            chemical_effector_factor = 1.0,
+            environment_lactonolysis_rate_h = 0.0,
+            environment_redox_factor = 1.0,
+            net_receptor_drive_multiplier = 1.0
+        )
+    end
+
+    # Mode 1: Direct receptor competition
+    direct_factor = 1.0 / (1.0 + spec.direct_receptor_competition_coeff * (noncog / max(cog + 0.1, 0.1)))
+    # Mode 2: Chemical-effector interference (e.g., P. aeruginosa HQNO / pyocyanin acting on S. aureus agr)
+    effector_factor = 1.0 / (1.0 + spec.chemical_effector_inhibition_coeff * chem)
+    # Mode 3: Environment-mediated modification (pH-driven AHL ring opening above pH 7.5 + redox modulation)
+    lactonolysis_rate_h = spec.alkaline_lactonolysis_coeff * max(0.0, 10.0 ^ (ph - 7.5) - 1.0)
+    redox_factor = clamp(1.0 + spec.redox_modulation_coeff * tanh((eh - 100.0) / 150.0), 0.4, 1.6)
+
+    net_mult = direct_factor * effector_factor * redox_factor
+    return (
+        direct_signal_perception_factor = direct_factor,
+        chemical_effector_factor = effector_factor,
+        environment_lactonolysis_rate_h = lactonolysis_rate_h,
+        environment_redox_factor = redox_factor,
+        net_receptor_drive_multiplier = net_mult
+    )
+end
+
+struct BiofilmRegulatoryState
+    time_h::Float64
+    extracellular_nutrient_mm::Float64
+    intracellular_quota_q::Float64
+    autoinducer_um::Float64
+    receptor_activity_r::Float64
+    rnaiii_activity::Float64
+    alpha_psm_activity::Float64
+    ev_particles_per_ml::Float64
+    frac_basal_planktonic::Float64
+    frac_fructose_hirt_tolerant::Float64
+    frac_metabolically_reduced::Float64
+    frac_oxidative_stress_repair::Float64
+
+    function BiofilmRegulatoryState(;
+            time_h::Real=0.0,
+            extracellular_nutrient_mm::Real=5.0,
+            intracellular_quota_q::Real=0.80,
+            autoinducer_um::Real=0.05,
+            receptor_activity_r::Real=0.05,
+            rnaiii_activity::Real=0.05,
+            alpha_psm_activity::Real=0.05,
+            ev_particles_per_ml::Real=1.0e6,
+            frac_basal_planktonic::Real=0.82,
+            frac_fructose_hirt_tolerant::Real=0.06,
+            frac_metabolically_reduced::Real=0.06,
+            frac_oxidative_stress_repair::Real=0.06)
+        t = Float64(time_h)
+        n_ext = Float64(extracellular_nutrient_mm)
+        q_int = Float64(intracellular_quota_q)
+        ai = Float64(autoinducer_um)
+        ra = Float64(receptor_activity_r)
+        rn = Float64(rnaiii_activity)
+        psm = Float64(alpha_psm_activity)
+        ev = Float64(ev_particles_per_ml)
+        fb = Float64(frac_basal_planktonic)
+        ff = Float64(frac_fructose_hirt_tolerant)
+        fm = Float64(frac_metabolically_reduced)
+        fo = Float64(frac_oxidative_stress_repair)
+        t >= 0 && n_ext >= 0 && q_int >= 0 && ai >= 0 &&
+            (0.0 <= ra <= 1.0) && (0.0 <= rn <= 1.0) && (0.0 <= psm <= 1.0) && ev >= 0 ||
+            throw(ArgumentError("invalid state variables in BiofilmRegulatoryState"))
+        all(x -> isfinite(x) && x >= 0.0, (fb, ff, fm, fo)) ||
+            throw(ArgumentError("subpopulation fractions must be finite and >= 0"))
+        s_frac = fb + ff + fm + fo
+        isapprox(s_frac, 1.0; atol=1e-6) ||
+            throw(ArgumentError("subpopulation fractions must sum to 1.0 (got $s_frac)"))
+        new(t, n_ext, q_int, ai, ra, rn, psm, ev, fb / s_frac, ff / s_frac, fm / s_frac, fo / s_frac)
+    end
+end
+
+struct BiofilmRegulatoryParams
+    topology::QSRegulatoryTopology
+    nutrient_uptake_rate_mm_h::Float64
+     nutrient_half_sat_mm::Float64
+    min_droop_quota::Float64
+    quota_replenish_rate_h::Float64
+    quota_consumption_rate_h::Float64
+    ai_basal_synth_um_h::Float64
+    ai_induced_synth_um_h::Float64
+    ai_natural_decay_h::Float64
+    ev_basal_release_per_ml_h::Float64
+    ev_psm_induced_release_per_ml_h::Float64
+    oxidative_stress_index::Float64
+    fructose_flux_index::Float64
+    vancomycin_exposure_ug_ml::Float64
+
+    function BiofilmRegulatoryParams(;
+            topology::QSRegulatoryTopology=QSRegulatoryTopology(),
+            nutrient_uptake_rate_mm_h::Real=0.38,
+            nutrient_half_sat_mm::Real=0.80,
+            min_droop_quota::Real=0.22,
+            quota_replenish_rate_h::Real=0.45,
+            quota_consumption_rate_h::Real=0.25,
+            ai_basal_synth_um_h::Real=0.04,
+            ai_induced_synth_um_h::Real=0.55,
+            ai_natural_decay_h::Real=0.18,
+            ev_basal_release_per_ml_h::Real=2.5e5,
+            ev_psm_induced_release_per_ml_h::Real=4.8e6,
+            oxidative_stress_index::Real=0.25,
+            fructose_flux_index::Real=0.60,
+            vancomycin_exposure_ug_ml::Real=0.0)
+        nu = Float64(nutrient_uptake_rate_mm_h)
+        ks = Float64(nutrient_half_sat_mm)
+        qmin = Float64(min_droop_quota)
+        qr = Float64(quota_replenish_rate_h)
+        qc = Float64(quota_consumption_rate_h)
+        ab = Float64(ai_basal_synth_um_h)
+        ai = Float64(ai_induced_synth_um_h)
+        ad = Float64(ai_natural_decay_h)
+        evb = Float64(ev_basal_release_per_ml_h)
+        evi = Float64(ev_psm_induced_release_per_ml_h)
+        ox = Float64(oxidative_stress_index)
+        fr = Float64(fructose_flux_index)
+        vc = Float64(vancomycin_exposure_ug_ml)
+        nu >= 0 && ks > 0 && (0.0 < qmin < 1.0) && qr >= 0 && qc >= 0 &&
+            ab >= 0 && ai >= 0 && ad >= 0 && evb >= 0 && evi >= 0 &&
+            (0.0 <= ox <= 5.0) && (0.0 <= fr <= 5.0) && vc >= 0 ||
+            throw(ArgumentError("invalid parameters in BiofilmRegulatoryParams"))
+        new(topology, nu, ks, qmin, qr, qc, ab, ai, ad, evb, evi, ox, fr, vc)
+    end
+end
+
+"""
+Advance the Milestone M4 biofilm regulatory and physiological heterogeneity
+state by `dt_h` hours.
+"""
+function step_biofilm_regulatory_ode(
+        state::BiofilmRegulatoryState,
+        params::BiofilmRegulatoryParams,
+        dt_h::Real;
+        switches::BiofilmHypothesisSwitches=BiofilmHypothesisSwitches(),
+        electrokinetic_spec::Union{Nothing,ElectrokineticQSSpec}=nothing,
+        intact_matrix::Union{Nothing,BiofilmMatrixComposition}=nothing,
+        crosstalk_spec::Union{Nothing,PolymicrobialCrosstalkSpec}=nothing,
+        non_cognate_signal_um::Real=0.0,
+        chemical_effector_um::Real=0.0,
+        local_ph::Real=7.0,
+        local_eh_mv::Real=100.0)
+    dt = Float64(dt_h)
+    dt > 0 || throw(ArgumentError("dt_h must be > 0"))
+
+    N = state.extracellular_nutrient_mm
+    monod = N / (N + params.nutrient_half_sat_mm)
+    dN_dt = -params.nutrient_uptake_rate_mm_h * monod
+    N_next = max(0.0, N + dt * dN_dt)
+
+    # Droop intracellular nutrient quota Q vs direct extracellular Monod coupling
+    Q = state.intracellular_quota_q
+    if switches.enable_droop_intracellular_quota
+        dQ_dt = params.quota_replenish_rate_h * monod * (1.2 - Q) -
+                params.quota_consumption_rate_h * max(0.0, Q - params.min_droop_quota)
+        Q_next = clamp(Q + dt * dQ_dt, params.min_droop_quota, 1.2)
+        metabolic_drive = clamp(1.0 - params.min_droop_quota / max(Q_next, params.min_droop_quota), 0.05, 1.0)
+    else
+        Q_next = Q
+        metabolic_drive = clamp(monod, 0.05, 1.0)
+    end
+
+    # Electrokinetic / ROS and polymicrobial QS signal degradation
+    ek_rate_h = if electrokinetic_spec === nothing
+        0.0
+    else
+        3600.0 * evaluate_qs_signal_degradation(
+            state.autoinducer_um, electrokinetic_spec;
+            intact_biofilm_matrix=intact_matrix, switches=switches
+        ).total_degradation_rate_s
+    end
+
+    ct_eval = crosstalk_spec === nothing ?
+        evaluate_polymicrobial_crosstalk(; switches=switches, local_ph=local_ph, local_eh_mv=local_eh_mv) :
+        evaluate_polymicrobial_crosstalk(
+            crosstalk_spec;
+            cognate_signal_um=state.autoinducer_um,
+            non_cognate_signal_um=non_cognate_signal_um,
+            chemical_effector_um=chemical_effector_um,
+            local_ph=local_ph,
+            local_eh_mv=local_eh_mv,
+            switches=switches
+        )
+
+    A = state.autoinducer_um
+    R = state.receptor_activity_r
+    dA_dt = (params.ai_basal_synth_um_h + params.ai_induced_synth_um_h * R) * metabolic_drive -
+            (params.ai_natural_decay_h + ek_rate_h + ct_eval.environment_lactonolysis_rate_h) * A
+    A_next = max(0.0, A + dt * dA_dt)
+
+    topo = params.topology
+    hill_num = (A_next ^ topo.hill_coefficient)
+    hill_den = (topo.activation_threshold_um ^ topo.hill_coefficient) + hill_num
+    r_target = clamp((hill_num / max(hill_den, 1e-12)) * ct_eval.net_receptor_drive_multiplier *
+                     (1.0 + 0.25 * topo.pqse_chaperone_coupling), 0.0, 1.0)
+    R_next = clamp(R + dt * 1.6 * (r_target - R), 0.0, 1.0)
+
+    # mBio Oct 2026: nutrient & oxidative stress modulate RNAIII and alpha-PSMs differentially,
+    # and alpha-PSMs drive S. aureus extracellular vesicle (EV) release
+    if switches.enable_nutrient_stress_qs_ev
+        nutrient_stress = 1.0 - metabolic_drive
+        rnaiii_target = clamp(R_next * (0.75 + 0.25 * metabolic_drive) / (1.0 + 0.35 * params.oxidative_stress_index), 0.0, 1.0)
+        psm_target = topo.rnaiii_psm_decoupled ?
+            clamp(R_next * (0.55 + 0.55 * nutrient_stress + 0.40 * params.oxidative_stress_index), 0.0, 1.0) :
+            rnaiii_target
+        rnaiii_next = clamp(state.rnaiii_activity + dt * 1.8 * (rnaiii_target - state.rnaiii_activity), 0.0, 1.0)
+        psm_next = clamp(state.alpha_psm_activity + dt * 1.8 * (psm_target - state.alpha_psm_activity), 0.0, 1.0)
+        dEV_dt = params.ev_basal_release_per_ml_h +
+                 params.ev_psm_induced_release_per_ml_h * psm_next * (1.0 + 0.30 * params.oxidative_stress_index)
+        ev_next = state.ev_particles_per_ml + dt * dEV_dt
+    else
+        rnaiii_next = R_next
+        psm_next = R_next
+        ev_next = state.ev_particles_per_ml + dt * params.ev_basal_release_per_ml_h
+    end
+
+    # ISME J Oct 2026: clonal S. aureus metabolic heterogeneity
+    # 1. fruA/fruK fructose-consuming cell-wall-thickened vancomycin-tolerant subpopulation
+    # 2. metabolically reduced dormant subpopulation
+    # 3. oxidative-stress-repair subpopulation
+    if switches.enable_subpopulation_heterogeneity
+        vanc_pressure = params.vancomycin_exposure_ug_ml / (params.vancomycin_exposure_ug_ml + 2.0)
+        target_fru = clamp(0.05 + 0.38 * (params.fructose_flux_index / (params.fructose_flux_index + 0.8)) *
+                           (1.0 + 0.85 * vanc_pressure), 0.02, 0.65)
+        target_red = clamp(0.04 + 0.36 * (1.0 - metabolic_drive) * (1.0 + 0.40 * vanc_pressure), 0.02, 0.55)
+        target_ox  = clamp(0.04 + 0.32 * (params.oxidative_stress_index / (params.oxidative_stress_index + 1.0)), 0.02, 0.50)
+
+        tot_spec = target_fru + target_red + target_ox
+        if tot_spec > 0.92
+            scale_f = 0.92 / tot_spec
+            target_fru *= scale_f
+            target_red *= scale_f
+            target_ox  *= scale_f
+        end
+        target_bas = max(0.08, 1.0 - (target_fru + target_red + target_ox))
+
+        rate_sub = 0.85
+        ff_next = state.frac_fructose_hirt_tolerant + dt * rate_sub * (target_fru - state.frac_fructose_hirt_tolerant)
+        fm_next = state.frac_metabolically_reduced + dt * rate_sub * (target_red - state.frac_metabolically_reduced)
+        fo_next = state.frac_oxidative_stress_repair + dt * rate_sub * (target_ox - state.frac_oxidative_stress_repair)
+        fb_next = state.frac_basal_planktonic + dt * rate_sub * (target_bas - state.frac_basal_planktonic)
+        s_all = fb_next + ff_next + fm_next + fo_next
+        fb_next /= s_all
+        ff_next /= s_all
+        fm_next /= s_all
+        fo_next /= s_all
+    else
+        fb_next = state.frac_basal_planktonic
+        ff_next = state.frac_fructose_hirt_tolerant
+        fm_next = state.frac_metabolically_reduced
+        fo_next = state.frac_oxidative_stress_repair
+    end
+
+    return BiofilmRegulatoryState(
+        time_h = state.time_h + dt,
+        extracellular_nutrient_mm = N_next,
+        intracellular_quota_q = Q_next,
+        autoinducer_um = A_next,
+        receptor_activity_r = R_next,
+        rnaiii_activity = rnaiii_next,
+        alpha_psm_activity = psm_next,
+        ev_particles_per_ml = ev_next,
+        frac_basal_planktonic = fb_next,
+        frac_fructose_hirt_tolerant = ff_next,
+        frac_metabolically_reduced = fm_next,
+        frac_oxidative_stress_repair = fo_next
+    )
+end
+
+function simulate_biofilm_regulatory_trajectory(
+        initial_state::BiofilmRegulatoryState,
+        params::BiofilmRegulatoryParams;
+        times_h::AbstractVector{<:Real}=collect(0.0:1.0:12.0),
+        max_step_h::Real=0.05,
+        switches::BiofilmHypothesisSwitches=BiofilmHypothesisSwitches(),
+        electrokinetic_spec::Union{Nothing,ElectrokineticQSSpec}=nothing,
+        intact_matrix::Union{Nothing,BiofilmMatrixComposition}=nothing,
+        crosstalk_spec::Union{Nothing,PolymicrobialCrosstalkSpec}=nothing,
+        non_cognate_signal_um::Real=0.0,
+        chemical_effector_um::Real=0.0,
+        local_ph::Real=7.0,
+        local_eh_mv::Real=100.0)
+    !isempty(times_h) && issorted(times_h) && first(times_h) >= initial_state.time_h ||
+        throw(ArgumentError("times_h must be non-empty, sorted, and >= initial_state.time_h"))
+    dt_max = Float64(max_step_h)
+    dt_max > 0 || throw(ArgumentError("max_step_h must be > 0"))
+
+    states = Vector{BiofilmRegulatoryState}(undef, length(times_h))
+    cur = initial_state
+    for (idx, t_raw) in enumerate(times_h)
+        t_target = Float64(t_raw)
+        while cur.time_h < t_target - 1e-12
+            dt = min(dt_max, t_target - cur.time_h)
+            cur = step_biofilm_regulatory_ode(
+                cur, params, dt;
+                switches=switches,
+                electrokinetic_spec=electrokinetic_spec,
+                intact_matrix=intact_matrix,
+                crosstalk_spec=crosstalk_spec,
+                non_cognate_signal_um=non_cognate_signal_um,
+                chemical_effector_um=chemical_effector_um,
+                local_ph=local_ph,
+                local_eh_mv=local_eh_mv
+            )
+        end
+        states[idx] = cur
+    end
+    return states
+end
+
+"""
+Project the 4-state `BiofilmRegulatoryState` subpopulation distribution into a
+3-state `CellStatePrediction` compatible with `FlowCytometryObservationModel`.
+"""
+function subpopulations_to_fcm_state(
+        state::BiofilmRegulatoryState;
+        total_cells_per_ml::Real=1.0e7,
+        collapse_mode::Symbol=:viability_3state)
+    c_tot = Float64(total_cells_per_ml)
+    c_tot > 0 || throw(ArgumentError("total_cells_per_ml must be > 0"))
+    if collapse_mode == :viability_3state
+        # Active + fruA/fruK cell-wall-thickened cells are membrane-intact;
+        # oxidative-stress-repair cells are partially membrane-compromised;
+        # metabolically reduced dormant/stressed tail splits between intact and compromised/lysed
+        f_intact = state.frac_basal_planktonic + state.frac_fructose_hirt_tolerant + 0.55 * state.frac_metabolically_reduced
+        f_comp = 0.75 * state.frac_oxidative_stress_repair + 0.30 * state.frac_metabolically_reduced
+        f_dead = 0.25 * state.frac_oxidative_stress_repair + 0.15 * state.frac_metabolically_reduced
+        s = f_intact + f_comp + f_dead
+        return CellStatePrediction(c_tot, (f_intact / s, f_comp / s, f_dead / s))
+    elseif collapse_mode == :tolerance_3state
+        # Group 1: fruA/fruK cell-wall-thickened vancomycin-tolerant
+        # Group 2: metabolically reduced + oxidative-stress-repair
+        # Group 3: basal planktonic susceptible
+        f1 = state.frac_fructose_hirt_tolerant
+        f2 = state.frac_metabolically_reduced + state.frac_oxidative_stress_repair
+        f3 = state.frac_basal_planktonic
+        s = f1 + f2 + f3
+        return CellStatePrediction(c_tot, (f1 / s, f2 / s, f3 / s))
+    else
+        throw(ArgumentError("collapse_mode must be :viability_3state or :tolerance_3state"))
+    end
+end
+
+end # module BiofilmMultiphysics
+
 using .FCSIO
 using .CytometryAnalysis
 using .CellClassifier
 using .MicrofluidicBridge
 using .SharedVisualizationPhysics
+using .BiofilmMultiphysics
 
-export ENGINE_VERSION, FCSIO, CytometryAnalysis, CellClassifier, MicrofluidicBridge, SharedVisualizationPhysics,
+export ENGINE_VERSION, FCSIO, CytometryAnalysis, CellClassifier, MicrofluidicBridge,
+       SharedVisualizationPhysics, BiofilmMultiphysics,
+       # Re-exports from FlowCytometryObservationModel (M1, M2, M5)
+       VALID_OPENFOAM_FIELD_CLASSES, VALID_OPENFOAM_PATCH_TYPES, VALID_DATA_PROVENANCES,
+       OpenFOAMBoundaryPatch, OpenFOAMMeshExchange,
+       PHREEQCMineralPhase, PHREEQCSpeciesAdapter,
+       EmpiricalValidationProtocol,
+       serialize_openfoam_ascii_field, parse_openfoam_ascii_field,
+       map_openfoam_field_conservative, audit_openfoam_transport_stability,
+       summarize_openfoam_mesh_to_snap,
+       audit_phreeqc_speciation_balance, serialize_phreeqc_selected_output,
+       parse_phreeqc_selected_output, summarize_phreeqc_adapter_to_snap,
+       evaluate_empirical_generalization_readiness,
        # Re-exports from FCSIO
        FCSChannelMetadata, FCSFileProvenance, FCSDataset, SensorTrajectoryRow,
        n_events, n_channels, channel_names, get_channel_vector, subset_events,
@@ -3001,6 +4199,7 @@ export ENGINE_VERSION, FCSIO, CytometryAnalysis, CellClassifier, MicrofluidicBri
        train_cell_classifier, predict_cells,
        group_aware_split, verify_no_group_leakage,
        evaluate_classifier_predictions, group_cross_validate,
+       detect_feature_domain_shift, audit_classifier_empirical_generalization,
        # Re-exports from MicrofluidicBridge
        MicrofluidicAssayCondition, MicroporeTransitEvent,
        JoinedMicrofluidicCellRecord, MicrofluidicBridgeReport,
@@ -3013,6 +4212,21 @@ export ENGINE_VERSION, FCSIO, CytometryAnalysis, CellClassifier, MicrofluidicBri
        CoreMultishellSpec, CoreMultishellSnapshot, CoreMultishellSolution,
        solve_core_multishell_rd,
        EmulsionDropletSpec, EmulsionDropletSnapshot, EmulsionDropletSolution,
-       solve_emulsion_interfacial_droplet
+       solve_emulsion_interfacial_droplet,
+       # Re-exports from BiofilmMultiphysics (M3 & M4)
+       VALID_QS_TOPOLOGIES, VALID_MORPHOLOGICAL_PHASES,
+       BiofilmHypothesisSwitches,
+       BiofilmMatrixComposition, total_matrix_biopolymer_kg_m3,
+       ThinFilmSwellingMechanicsSpec, evaluate_biofilm_swelling_mechanics,
+       HeterogeneousDiffusivitySpec, compute_effective_diffusivity,
+       compute_spatial_diffusivity_field,
+       LocalizedDeliverySourceSpec, evaluate_localized_source_term,
+       solve_1d_reactive_transport_biofilm,
+       QSRegulatoryTopology,
+       ElectrokineticQSSpec, evaluate_qs_signal_degradation,
+       PolymicrobialCrosstalkSpec, evaluate_polymicrobial_crosstalk,
+       BiofilmRegulatoryState, BiofilmRegulatoryParams,
+       step_biofilm_regulatory_ode, simulate_biofilm_regulatory_trajectory,
+       subpopulations_to_fcm_state
 
 end # module MicrofluidicClassificationEngine

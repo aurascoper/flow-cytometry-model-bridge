@@ -432,4 +432,396 @@ using .FlowCytometryObservationModel
             sample=sample,
             calibration=identity_gates)
     end
+
+    # -----------------------------------------------------------------------
+    # 8. Milestone M1: Mesh-aware OpenFOAM spatial field exchange and conservation
+    # -----------------------------------------------------------------------
+    @testset "Milestone M1: OpenFOAMMeshExchange, ASCII IO, and conservative mapping" begin
+        centers = [
+            0.001 0.000 0.000;
+            0.003 0.000 0.000;
+            0.005 0.000 0.000;
+            0.007 0.000 0.000;
+            0.009 0.000 0.000;
+            0.011 0.000 0.000
+        ]
+        vols = [1.0e-9, 1.5e-9, 2.0e-9, 2.0e-9, 1.5e-9, 1.0e-9]
+        conc = [12.5, 10.2, 8.4, 6.1, 4.3, 2.8]
+        vels = [0.004, 0.005, 0.006, 0.006, 0.005, 0.004]
+        diffs = fill(1.2e-9, 6)
+        patches = [
+            OpenFOAMBoundaryPatch("inlet", :fixedValue, [14.0, 14.0]; flux_mol_s=2.5e-8),
+            OpenFOAMBoundaryPatch("outlet", :zeroGradient, Float64[]; flux_mol_s=-2.1e-8),
+            OpenFOAMBoundaryPatch("biofilm_wall", :fixedFlux, [2.8]; flux_mol_s=-0.4e-8)
+        ]
+
+        ex = OpenFOAMMeshExchange(
+            vessel_id = "V07",
+            time_h = 168.0,
+            timestep_s = 0.05,
+            compartment = :detached_biofilm,
+            mesh_id = "coupon-pore-mesh-6cell",
+            solver_version = "OpenFOAM-v2406",
+            field_name = "C_fructose",
+            field_class = :volScalarField,
+            dimensions = (0, -3, 0, 0, 1, 0, 0),
+            cell_centers_m = centers,
+            cell_volumes_m3 = vols,
+            internal_field = conc,
+            boundary_patches = patches,
+            velocity_magnitudes_m_s = vels,
+            diffusivities_m2_s = diffs,
+            epistemic_status = :predicted
+        )
+        @test occursin(r"^[0-9a-f]{64}$", ex.source_sha256)
+
+        # ASCII serialization and parsing round-trip
+        ascii_str = serialize_openfoam_ascii_field(ex)
+        @test occursin("FoamFile", ascii_str)
+        @test occursin("nonuniform List<scalar>", ascii_str)
+        ex_parsed = parse_openfoam_ascii_field(
+            ascii_str;
+            vessel_id = "V07",
+            time_h = 168.0,
+            timestep_s = 0.05,
+            compartment = :detached_biofilm,
+            mesh_id = "coupon-pore-mesh-6cell",
+            cell_centers_m = centers,
+            cell_volumes_m3 = vols,
+            velocity_magnitudes_m_s = vels,
+            diffusivities_m2_s = diffs
+        )
+        @test isapprox(vec(ex_parsed.internal_field), conc; rtol=1e-10)
+        @test ex_parsed.dimensions == (0, -3, 0, 0, 1, 0, 0)
+        @test length(ex_parsed.boundary_patches) == 3
+        @test isapprox(ex_parsed.boundary_patches[1].flux_mol_s, 2.5e-8; rtol=1e-10)
+
+        # Vector field (:volVectorField) and uniform internalField round-trip
+        vec_fld = [
+            0.004 0.0001 0.0;
+            0.005 0.0002 0.0;
+            0.006 0.0001 0.0;
+            0.006 -0.0001 0.0;
+            0.005 -0.0002 0.0;
+            0.004 0.0000 0.0
+        ]
+        ex_vec = OpenFOAMMeshExchange(
+            vessel_id = "V07",
+            time_h = 168.0,
+            timestep_s = 0.05,
+            compartment = :detached_biofilm,
+            field_name = "U",
+            field_class = :volVectorField,
+            dimensions = (0, 1, -1, 0, 0, 0, 0),
+            cell_centers_m = centers,
+            cell_volumes_m3 = vols,
+            internal_field = vec_fld
+        )
+        vec_ascii = serialize_openfoam_ascii_field(ex_vec)
+        vec_parsed = parse_openfoam_ascii_field(
+            vec_ascii;
+            vessel_id = "V07",
+            time_h = 168.0,
+            timestep_s = 0.05,
+            compartment = :detached_biofilm,
+            cell_centers_m = centers,
+            cell_volumes_m3 = vols
+        )
+        @test vec_parsed.field_class == :volVectorField
+        @test isapprox(vec_parsed.internal_field, vec_fld; rtol=1e-10)
+
+        # Uniform scalar field parsing
+        unif_ascii = """
+        FoamFile
+        {
+            version 2.0;
+            format ascii;
+            class volScalarField;
+            object C_uniform;
+        }
+        dimensions [0 -3 0 0 1 0 0];
+        internalField uniform 5.25;
+        boundaryField
+        {
+            walls { type zeroGradient; }
+        }
+        """
+        unif_parsed = parse_openfoam_ascii_field(
+            unif_ascii;
+            vessel_id = "V07",
+            time_h = 168.0,
+            timestep_s = 0.05,
+            compartment = :detached_biofilm,
+            cell_centers_m = centers,
+            cell_volumes_m3 = vols
+        )
+        @test all(x -> isapprox(x, 5.25; atol=1e-12), unif_parsed.internal_field)
+
+        # Conservative volume-weighted mapping from 6 fine cells to 2 coarse compartments
+        # Cell 3 (V = 2.0e-9) is split 40% into compartment 1 and 60% into compartment 2
+        W = [
+            1.0 1.0 0.4 0.0 0.0 0.0;
+            0.0 0.0 0.6 1.0 1.0 1.0
+        ]
+        tgt_vols = vec(W * vols)
+        mapped_res = map_openfoam_field_conservative(ex, tgt_vols, W)
+        @test mapped_res.mass_conserved
+        @test mapped_res.max_relative_mass_error <= 1e-14
+        @test isapprox(mapped_res.source_totals[1], sum(conc .* vols); rtol=1e-14)
+        @test isapprox(mapped_res.target_totals[1], mapped_res.source_totals[1]; rtol=1e-14)
+
+        # Non-conservative overlap weights (column sum != 1) or mismatched target volumes are rejected
+        W_bad = copy(W)
+        W_bad[1, 3] = 0.5
+        @test_throws ArgumentError map_openfoam_field_conservative(ex, tgt_vols, W_bad)
+        @test_throws ArgumentError map_openfoam_field_conservative(ex, tgt_vols .* 1.05, W)
+
+        # Courant / Peclet / nonnegativity numerical stability audit
+        stab = audit_openfoam_transport_stability(ex; max_courant=1.0, max_peclet=10_000.0)
+        @test stab.stable
+        @test stab.max_courant_observed < 0.5
+        @test isapprox(stab.total_integrated_amount, sum(conc .* vols); rtol=1e-14)
+        @test isapprox(stab.net_boundary_flux_mol_s, 0.0; atol=1e-15)
+
+        # Excessive Courant number or negative concentration fails stability check
+        stab_strict = audit_openfoam_transport_stability(ex; max_courant=0.01, max_peclet=10_000.0)
+        @test !stab_strict.stable
+
+        # Summarize to scalar OpenFOAMTransportSnap and verify alignment
+        snap_from_mesh = summarize_openfoam_mesh_to_snap(ex; wall_shear_pa=0.45, residence_time_s=1800.0)
+        @test snap_from_mesh.vessel_id == "V07"
+        @test validate_solver_observation_alignment(sample, "V07", 168.0; mesh_transport=ex)
+
+        ex_wrong_vessel = OpenFOAMMeshExchange(
+            vessel_id = "V99", time_h = 168.0, timestep_s = 0.05,
+            compartment = :detached_biofilm, cell_centers_m = centers,
+            cell_volumes_m3 = vols, internal_field = conc
+        )
+        @test_throws ArgumentError validate_solver_observation_alignment(sample, "V07", 168.0; mesh_transport=ex_wrong_vessel)
+    end
+
+    # -----------------------------------------------------------------------
+    # 9. Milestone M2: Full-species PHREEQC snapshot adapter and balance audits
+    # -----------------------------------------------------------------------
+    @testset "Milestone M2: PHREEQCSpeciesAdapter, charge/element balance, and TSV IO" begin
+        # Construct an electrically neutral, element-balanced aqueous solution at 25 C
+        pH_val = 7.0
+        pe_val = -3.5
+        h_mol  = 1.0e-7
+        oh_mol = 1.0e-7
+        ca_free = 0.010
+        cahco3  = 0.001
+        mg_free = 0.004
+        fe2_free = 0.0005
+        na_free = 0.020
+        hco3    = 0.008
+        so4     = 0.010
+        hs_minus = 0.001
+        h2s_aq   = 0.0005
+        # Total positive charge = 2*(0.010) + 1*(0.001) + 2*(0.004) + 2*(0.0005) + 1*(0.020) + 1e-7 = 0.050 + 1e-7
+        # Negative charge without Cl- = 1*(0.008) + 2*(0.010) + 1*(0.001) + 1e-7 = 0.029 + 1e-7
+        cl_minus = 0.021
+
+        molalities = Dict{String,Float64}(
+            "H+" => h_mol,
+            "OH-" => oh_mol,
+            "Ca+2" => ca_free,
+            "CaHCO3+" => cahco3,
+            "Mg+2" => mg_free,
+            "Fe+2" => fe2_free,
+            "Na+" => na_free,
+            "HCO3-" => hco3,
+            "SO4-2" => so4,
+            "HS-" => hs_minus,
+            "H2S" => h2s_aq,
+            "Cl-" => cl_minus
+        )
+        charges = Dict{String,Int}(
+            "H+" => 1, "OH-" => -1, "Ca+2" => 2, "CaHCO3+" => 1,
+            "Mg+2" => 2, "Fe+2" => 2, "Na+" => 1, "HCO3-" => -1,
+            "SO4-2" => -2, "HS-" => -1, "H2S" => 0, "Cl-" => -1
+        )
+        act_coeffs = Dict{String,Float64}(
+            sp => (abs(z) == 2 ? 0.72 : (abs(z) == 1 ? 0.90 : 1.0))
+            for (sp, z) in charges
+        )
+        act_coeffs["H+"] = 1.0 # so -log10(a_H+) == 7.0 == pH
+
+        stoich = Dict{String,Dict{String,Float64}}(
+            "Ca+2" => Dict("Ca" => 1.0),
+            "CaHCO3+" => Dict("Ca" => 1.0, "C" => 1.0),
+            "Mg+2" => Dict("Mg" => 1.0),
+            "Fe+2" => Dict("Fe" => 1.0),
+            "Na+" => Dict("Na" => 1.0),
+            "HCO3-" => Dict("C" => 1.0),
+            "SO4-2" => Dict("S" => 1.0),
+            "HS-" => Dict("S" => 1.0),
+            "H2S" => Dict("S" => 1.0),
+            "Cl-" => Dict("Cl" => 1.0)
+        )
+        elem_totals = Dict{String,Float64}(
+            "Ca" => ca_free + cahco3,
+            "Mg" => mg_free,
+            "Fe" => fe2_free,
+            "Na" => na_free,
+            "C"  => cahco3 + hco3,
+            "S"  => so4 + hs_minus + h2s_aq,
+            "Cl" => cl_minus
+        )
+        ionic_str = 0.5 * sum((charges[sp]^2) * m for (sp, m) in molalities)
+        minerals = [
+            PHREEQCMineralPhase("Calcite", "CaCO3"; saturation_index=0.18, moles_mol_L=0.002, delta_moles_mol_L=1.5e-5),
+            PHREEQCMineralPhase("Mackinawite", "FeS"; saturation_index=0.65, moles_mol_L=0.0004, delta_moles_mol_L=3.0e-5),
+            PHREEQCMineralPhase("Gypsum", "CaSO4:2H2O"; saturation_index=-1.12, moles_mol_L=0.0, delta_moles_mol_L=0.0)
+        ]
+
+        ph_adapter = PHREEQCSpeciesAdapter(
+            vessel_id = "V07",
+            time_h = 168.0,
+            compartment = :detached_biofilm,
+            pH = pH_val,
+            pe = pe_val,
+            ionic_strength_M = ionic_str,
+            species_molalities_mol_kgw = molalities,
+            species_charges = charges,
+            species_activity_coeffs = act_coeffs,
+            element_totals_mol_kgw = elem_totals,
+            species_stoichiometry = stoich,
+            mineral_phases = minerals
+        )
+
+        audit = audit_phreeqc_speciation_balance(ph_adapter)
+        @test audit.consistent
+        @test abs(audit.charge_imbalance_pct) < 1e-9
+        @test audit.ionic_strength_consistent
+        @test audit.element_balance_consistent
+        @test audit.max_element_rel_error < 1e-12
+        @test audit.nernst_eh_consistent
+        @test audit.ph_activity_consistent
+        @test "Calcite" in audit.supersaturated_minerals
+        @test "Mackinawite" in audit.supersaturated_minerals
+        @test "Gypsum" in audit.undersaturated_minerals
+
+        # Selected-output TSV round-trip
+        tsv_str = serialize_phreeqc_selected_output(ph_adapter)
+        ph_parsed = parse_phreeqc_selected_output(
+            tsv_str;
+            species_charges = charges,
+            species_activity_coeffs = act_coeffs,
+            species_stoichiometry = stoich
+        )
+        audit_parsed = audit_phreeqc_speciation_balance(ph_parsed)
+        @test audit_parsed.consistent
+        @test isapprox(ph_parsed.species_molalities_mol_kgw["Fe+2"], fe2_free; rtol=1e-9)
+        @test length(ph_parsed.mineral_phases) == 3
+
+        # Summarize to scalar PHREEQCSpeciationSnap and verify observation alignment
+        snap_chem = summarize_phreeqc_adapter_to_snap(ph_adapter)
+        @test isapprox(snap_chem.ca_mol_L, ca_free + cahco3; rtol=1e-10)
+        @test isapprox(snap_chem.sulfide_mol_L, hs_minus + h2s_aq; rtol=1e-10)
+        @test validate_solver_observation_alignment(sample, "V07", 168.0; species_chemistry=ph_adapter)
+
+        # Detect severe charge or element imbalance
+        bad_elem_totals = copy(elem_totals)
+        bad_elem_totals["Ca"] = 0.050 # 5x higher than species sum
+        ph_bad_el = PHREEQCSpeciesAdapter(
+            vessel_id = "V07", time_h = 168.0, compartment = :detached_biofilm,
+            pH = pH_val, pe = pe_val, ionic_strength_M = ionic_str,
+            species_molalities_mol_kgw = molalities, species_charges = charges,
+            element_totals_mol_kgw = bad_elem_totals, species_stoichiometry = stoich
+        )
+        audit_bad = audit_phreeqc_speciation_balance(ph_bad_el)
+        @test !audit_bad.consistent
+        @test !audit_bad.element_balance_consistent
+    end
+
+    # -----------------------------------------------------------------------
+    # 10. Milestone M5: Empirical validation protocol & generalization gate
+    # -----------------------------------------------------------------------
+    @testset "Milestone M5: EmpiricalValidationProtocol and generalization readiness" begin
+        # 1. Synthetic simulation cannot claim empirical generalization even with 99% CV accuracy
+        proto_synth = EmpiricalValidationProtocol(
+            protocol_id = "SYNTH-01",
+            track = :track1_nanobio,
+            data_provenance = :synthetic_simulation,
+            independent_reference_labels = false,
+            n_independent_runs = 3,
+            n_heldout_runs = 1
+        )
+        res_synth = evaluate_empirical_generalization_readiness(
+            proto_synth;
+            target_task = :cell_stress_damage,
+            synthetic_accuracy = 0.99,
+            heldout_run_accuracy = 0.98
+        )
+        @test res_synth.software_verification_passed
+        @test !res_synth.empirical_generalization_established
+        @test !isempty(res_synth.blocking_reasons)
+
+        # Synthetic provenance claiming independent_reference_labels = true is rejected
+        @test_throws ArgumentError EmpiricalValidationProtocol(
+            data_provenance = :synthetic_simulation,
+            independent_reference_labels = true
+        )
+
+        # 2. Nanocarrier uptake on experimental FCS without internalization imaging flags surface association warning
+        proto_uptake_no_img = EmpiricalValidationProtocol(
+            protocol_id = "EXP-GHOSH-01",
+            track = :track1_nanobio,
+            data_provenance = :deidentified_experimental_fcs,
+            independent_reference_labels = true,
+            counting_beads_verified = true,
+            internalization_imaging_verified = false,
+            n_independent_runs = 4,
+            n_heldout_runs = 1
+        )
+        res_no_img = evaluate_empirical_generalization_readiness(
+            proto_uptake_no_img;
+            target_task = :nanocarrier_uptake,
+            synthetic_accuracy = 0.96,
+            heldout_run_accuracy = 0.91,
+            feature_psi_drift = 0.08
+        )
+        @test res_no_img.software_verification_passed
+        @test res_no_img.surface_association_only_warning
+        @test !res_no_img.internalization_proven
+        @test !res_no_img.empirical_generalization_established
+
+        # 3. Full empirical readiness when imaging, controls, held-out run, and low PSI drift are satisfied
+        proto_uptake_full = EmpiricalValidationProtocol(
+            protocol_id = "EXP-GHOSH-02",
+            track = :track1_nanobio,
+            data_provenance = :deidentified_experimental_fcs,
+            independent_reference_labels = true,
+            counting_beads_verified = true,
+            internalization_imaging_verified = true,
+            n_independent_runs = 4,
+            n_heldout_runs = 1
+        )
+        res_full = evaluate_empirical_generalization_readiness(
+            proto_uptake_full;
+            target_task = :nanocarrier_uptake,
+            synthetic_accuracy = 0.96,
+            heldout_run_accuracy = 0.91,
+            feature_psi_drift = 0.08
+        )
+        @test res_full.software_verification_passed
+        @test res_full.empirical_generalization_established
+        @test res_full.internalization_proven
+        @test !res_full.surface_association_only_warning
+        @test !res_full.domain_shift_detected
+        @test !res_full.external_solvers_coupled_in_production
+        @test isempty(res_full.blocking_reasons)
+
+        # 4. Feature domain shift (PSI > 0.25) blocks empirical generalization
+        res_drift = evaluate_empirical_generalization_readiness(
+            proto_uptake_full;
+            target_task = :nanocarrier_uptake,
+            synthetic_accuracy = 0.96,
+            heldout_run_accuracy = 0.91,
+            feature_psi_drift = 0.42
+        )
+        @test res_drift.domain_shift_detected
+        @test !res_drift.empirical_generalization_established
+    end
 end

@@ -1,6 +1,8 @@
 module FlowCytometryObservationModel
 
 using Random
+using Printf
+import SHA
 
 """
 Observation adapter for flow-cytometry summaries of microbial systems.
@@ -23,11 +25,16 @@ stain and gates for the organism and matrix being measured.
 export MODEL_ADAPTER_VERSION,
        VALID_SAMPLE_ORIGINS, VALID_VOLUME_CONVENTIONS,
        VALID_STAKEHOLDER_TRACKS, VALID_EPISTEMIC_STATUSES,
+       VALID_OPENFOAM_FIELD_CLASSES, VALID_OPENFOAM_PATCH_TYPES,
+       VALID_DATA_PROVENANCES,
        REQUIRED_CSV_COLUMNS,
        CellStatePrediction, GateCalibration, FCMSampleSummary,
        MESFCalibrationCurve, BeadSizeCalibration,
        ConcentrationUncertainty,
        OpenFOAMTransportSnap, PHREEQCSpeciationSnap, StakeholderTrackContract,
+       OpenFOAMBoundaryPatch, OpenFOAMMeshExchange,
+       PHREEQCMineralPhase, PHREEQCSpeciesAdapter,
+       EmpiricalValidationProtocol,
        EpistemicQuantity, ProductionAuditRecord,
        effective_sample_volume_ml, expected_cell_events,
        predicted_gate_probabilities, absolute_cells_per_ml,
@@ -40,14 +47,24 @@ export MODEL_ADAPTER_VERSION,
        estimate_gate_calibration,
        concentration_uncertainty, check_parameter_identifiability, evaluate_equifinality,
        split_train_holdout, posterior_predictive_check,
+       serialize_openfoam_ascii_field, parse_openfoam_ascii_field,
+       map_openfoam_field_conservative, audit_openfoam_transport_stability,
+       summarize_openfoam_mesh_to_snap,
+       audit_phreeqc_speciation_balance,
+       serialize_phreeqc_selected_output, parse_phreeqc_selected_output,
+       summarize_phreeqc_adapter_to_snap,
+       evaluate_empirical_generalization_readiness,
        validate_solver_observation_alignment, validate_sample_csv_header,
        build_production_audit_record
 
-const MODEL_ADAPTER_VERSION = "0.2.0"
+const MODEL_ADAPTER_VERSION = "0.3.0"
 const VALID_SAMPLE_ORIGINS = (:effluent, :planktonic, :detached_biofilm)
 const VALID_VOLUME_CONVENTIONS = (:aliquot_post_dilution, :undiluted_equivalent, :beads_co_diluted)
 const VALID_STAKEHOLDER_TRACKS = (:track1_nanobio, :track2_clay_corrosion, :track3_bitumen_rheology)
 const VALID_EPISTEMIC_STATUSES = (:observed, :calibrated, :assumed, :predicted)
+const VALID_OPENFOAM_FIELD_CLASSES = (:volScalarField, :volVectorField)
+const VALID_OPENFOAM_PATCH_TYPES = (:fixedValue, :zeroGradient, :fixedFlux, :empty, :wall, :inlet, :outlet)
+const VALID_DATA_PROVENANCES = (:synthetic_simulation, :bench_control_only, :deidentified_experimental_fcs)
 
 const REQUIRED_CSV_COLUMNS = (
     "sample_id", "vessel_id", "arm", "time_h", "sample_origin", "gate_id",
@@ -1176,15 +1193,883 @@ struct StakeholderTrackContract
     end
 end
 
+# ---------------------------------------------------------------------------
+# M1: Mesh-aware OpenFOAM spatial transport field exchange and conservation
+# ---------------------------------------------------------------------------
+
+struct OpenFOAMBoundaryPatch
+    name::String
+    patch_type::Symbol
+    values::Vector{Float64}
+    flux_mol_s::Float64
+
+    function OpenFOAMBoundaryPatch(name::AbstractString,
+                                   patch_type::Symbol,
+                                   values::AbstractVector{<:Real}=Float64[];
+                                   flux_mol_s::Real=0.0)
+        nm = String(strip(name))
+        !isempty(nm) || throw(ArgumentError("boundary patch name must be non-empty"))
+        patch_type in VALID_OPENFOAM_PATCH_TYPES ||
+            throw(ArgumentError("patch_type must be one of $(VALID_OPENFOAM_PATCH_TYPES)"))
+        vals = Float64.(values)
+        all(isfinite, vals) || throw(ArgumentError("boundary patch values must be finite"))
+        flx = Float64(flux_mol_s)
+        isfinite(flx) || throw(ArgumentError("flux_mol_s must be finite"))
+        new(nm, patch_type, vals, flx)
+    end
+end
+
 """
-Verify that OpenFOAM transport and PHREEQC speciation snapshots match the
-cytometry sample's vessel, time point, and compartment before coupling.
+Mesh-aware OpenFOAM spatial field snapshot (`OpenFOAMMeshExchange`) for offline
+one-way and conservative two-way multiphysics exchange.
+
+`dimensions` follows the 7-element OpenFOAM SI dimension set:
+  `[kg, m, s, K, mol, A, cd]`
+For example:
+  - molar concentration (`mol/m^3`): `(0, -3, 0, 0, 1, 0, 0)`
+  - velocity (`m/s`): `(0, 1, -1, 0, 0, 0, 0)`
+  - diffusivity (`m^2/s`): `(0, 2, -1, 0, 0, 0, 0)`
+  - pressure / shear stress (`Pa`): `(1, -1, -2, 0, 0, 0, 0)`
+"""
+struct OpenFOAMMeshExchange
+    vessel_id::String
+    time_h::Float64
+    timestep_s::Float64
+    compartment::Symbol
+    mesh_id::String
+    solver_version::String
+    field_name::String
+    field_class::Symbol
+    dimensions::NTuple{7,Int}
+    cell_centers_m::Matrix{Float64}
+    cell_volumes_m3::Vector{Float64}
+    internal_field::Matrix{Float64}
+    boundary_patches::Vector{OpenFOAMBoundaryPatch}
+    velocity_magnitudes_m_s::Vector{Float64}
+    diffusivities_m2_s::Vector{Float64}
+    epistemic_status::Symbol
+    source_sha256::String
+
+    function OpenFOAMMeshExchange(;
+            vessel_id::AbstractString,
+            time_h::Real,
+            timestep_s::Real,
+            compartment::Symbol,
+            mesh_id::AbstractString="openfoam-polyMesh-v1",
+            solver_version::AbstractString="OpenFOAM-v2406",
+            field_name::AbstractString="C_substrate",
+            field_class::Symbol=:volScalarField,
+            dimensions::NTuple{7,<:Integer}=(0, -3, 0, 0, 1, 0, 0),
+            cell_centers_m::AbstractMatrix{<:Real},
+            cell_volumes_m3::AbstractVector{<:Real},
+            internal_field::Union{AbstractVector{<:Real},AbstractMatrix{<:Real}},
+            boundary_patches::AbstractVector{OpenFOAMBoundaryPatch}=OpenFOAMBoundaryPatch[],
+            velocity_magnitudes_m_s::AbstractVector{<:Real}=Float64[],
+            diffusivities_m2_s::AbstractVector{<:Real}=Float64[],
+            epistemic_status::Symbol=:predicted,
+            source_sha256::AbstractString="")
+        vid = String(strip(vessel_id))
+        mid = String(strip(mesh_id))
+        sver = String(strip(solver_version))
+        fname = String(strip(field_name))
+        !isempty(vid) && !isempty(mid) && !isempty(sver) && !isempty(fname) ||
+            throw(ArgumentError("vessel_id, mesh_id, solver_version, and field_name must be non-empty"))
+        compartment in VALID_SAMPLE_ORIGINS ||
+            throw(ArgumentError("compartment must be one of $(VALID_SAMPLE_ORIGINS)"))
+        field_class in VALID_OPENFOAM_FIELD_CLASSES ||
+            throw(ArgumentError("field_class must be one of $(VALID_OPENFOAM_FIELD_CLASSES)"))
+        epistemic_status in VALID_EPISTEMIC_STATUSES ||
+            throw(ArgumentError("epistemic_status must be one of $(VALID_EPISTEMIC_STATUSES)"))
+
+        th = Float64(time_h)
+        dt = Float64(timestep_s)
+        isfinite(th) && th >= 0 || throw(ArgumentError("time_h must be finite and >= 0"))
+        isfinite(dt) && dt > 0 || throw(ArgumentError("timestep_s must be finite and > 0"))
+
+        n_cells = length(cell_volumes_m3)
+        n_cells >= 1 || throw(ArgumentError("mesh must contain at least 1 cell"))
+        size(cell_centers_m) == (n_cells, 3) ||
+            throw(ArgumentError("cell_centers_m must have dimensions (n_cells, 3)"))
+        centers = Float64.(cell_centers_m)
+        vols = Float64.(cell_volumes_m3)
+        all(isfinite, centers) || throw(ArgumentError("cell_centers_m entries must be finite"))
+        all(v -> isfinite(v) && v > 0, vols) ||
+            throw(ArgumentError("cell_volumes_m3 entries must be finite and > 0"))
+
+        fld = if internal_field isa AbstractVector
+            reshape(Float64.(internal_field), :, 1)
+        else
+            Float64.(internal_field)
+        end
+        size(fld, 1) == n_cells ||
+            throw(ArgumentError("internal_field row count ($(size(fld, 1))) must equal n_cells ($n_cells)"))
+        expected_cols = field_class == :volScalarField ? 1 : 3
+        size(fld, 2) == expected_cols ||
+            throw(ArgumentError("internal_field column count ($(size(fld, 2))) must be $expected_cols for $field_class"))
+        all(isfinite, fld) || throw(ArgumentError("internal_field entries must be finite"))
+
+        vel_vec = isempty(velocity_magnitudes_m_s) ? zeros(Float64, n_cells) : Float64.(velocity_magnitudes_m_s)
+        diff_vec = isempty(diffusivities_m2_s) ? fill(1.0e-9, n_cells) : Float64.(diffusivities_m2_s)
+        length(vel_vec) == n_cells ||
+            throw(ArgumentError("velocity_magnitudes_m_s length must equal n_cells"))
+        length(diff_vec) == n_cells ||
+            throw(ArgumentError("diffusivities_m2_s length must equal n_cells"))
+        all(x -> isfinite(x) && x >= 0, vel_vec) ||
+            throw(ArgumentError("velocity_magnitudes_m_s must be finite and >= 0"))
+        all(x -> isfinite(x) && x >= 0, diff_vec) ||
+            throw(ArgumentError("diffusivities_m2_s must be finite and >= 0"))
+
+        dims = NTuple{7,Int}(Int.(dimensions))
+        patches = collect(OpenFOAMBoundaryPatch, boundary_patches)
+        seen_patches = Set{String}()
+        for p in patches
+            !(p.name in seen_patches) ||
+                throw(ArgumentError("duplicate boundary patch name '$(p.name)'"))
+            push!(seen_patches, p.name)
+        end
+
+        digest = if isempty(strip(source_sha256))
+            bytes2hex(SHA.sha256(string(vid, ":", th, ":", mid, ":", fname, ":", sum(vols), ":", sum(fld))))
+        else
+            d = lowercase(strip(String(source_sha256)))
+            occursin(r"^[0-9a-f]{64}$", d) ||
+                throw(ArgumentError("source_sha256 must be a valid 64-character lowercase hex SHA-256 digest"))
+            d
+        end
+
+        new(vid, th, dt, compartment, mid, sver, fname, field_class, dims,
+            centers, vols, fld, patches, vel_vec, diff_vec, epistemic_status, digest)
+    end
+end
+
+"""
+Serialize an `OpenFOAMMeshExchange` snapshot into an OpenFOAM v2.0 ASCII dictionary
+with `FoamFile`, `dimensions`, `internalField`, and `boundaryField` blocks.
+"""
+function serialize_openfoam_ascii_field(ex::OpenFOAMMeshExchange)
+    io = IOBuffer()
+    println(io, "FoamFile")
+    println(io, "{")
+    println(io, "    version     2.0;")
+    println(io, "    format      ascii;")
+    println(io, "    class       $(ex.field_class);")
+    println(io, "    location    \"$(ex.time_h)\";")
+    println(io, "    object      $(ex.field_name);")
+    println(io, "}")
+    d = ex.dimensions
+    println(io, "dimensions      [$(d[1]) $(d[2]) $(d[3]) $(d[4]) $(d[5]) $(d[6]) $(d[7])];")
+    n = length(ex.cell_volumes_m3)
+    if ex.field_class == :volScalarField
+        println(io, "internalField   nonuniform List<scalar>")
+        println(io, n)
+        println(io, "(")
+        for i in 1:n
+            @printf(io, "%.12g\n", ex.internal_field[i, 1])
+        end
+        println(io, ");")
+    else
+        println(io, "internalField   nonuniform List<vector>")
+        println(io, n)
+        println(io, "(")
+        for i in 1:n
+            @printf(io, "(%.12g %.12g %.12g)\n",
+                ex.internal_field[i, 1], ex.internal_field[i, 2], ex.internal_field[i, 3])
+        end
+        println(io, ");")
+    end
+    println(io, "boundaryField")
+    println(io, "{")
+    for p in ex.boundary_patches
+        println(io, "    $(p.name)")
+        println(io, "    {")
+        println(io, "        type            $(p.patch_type);")
+        @printf(io, "        flux_mol_s      %.12g;\n", p.flux_mol_s)
+        if !isempty(p.values)
+            println(io, "        value           nonuniform List<scalar> $(length(p.values)) ( ",
+                join([@sprintf("%.12g", v) for v in p.values], " "), " );")
+        end
+        println(io, "    }")
+    end
+    println(io, "}")
+    return String(take!(io))
+end
+
+"""
+Parse an OpenFOAM v2.0 ASCII field dictionary (`volScalarField` or `volVectorField`)
+into an `OpenFOAMMeshExchange` struct and record SHA-256 provenance of the raw text.
+"""
+function parse_openfoam_ascii_field(
+        ascii_text::AbstractString;
+        vessel_id::AbstractString,
+        time_h::Real,
+        timestep_s::Real,
+        compartment::Symbol,
+        mesh_id::AbstractString="openfoam-polyMesh-v1",
+        solver_version::AbstractString="OpenFOAM-v2406",
+        cell_centers_m::AbstractMatrix{<:Real},
+        cell_volumes_m3::AbstractVector{<:Real},
+        velocity_magnitudes_m_s::AbstractVector{<:Real}=Float64[],
+        diffusivities_m2_s::AbstractVector{<:Real}=Float64[],
+        epistemic_status::Symbol=:predicted)
+    txt = String(ascii_text)
+    occursin("FoamFile", txt) ||
+        throw(ArgumentError("OpenFOAM dictionary is missing FoamFile header"))
+
+    cls_m = match(r"class\s+(volScalarField|volVectorField)\s*;", txt)
+    cls_m !== nothing || throw(ArgumentError("unsupported or missing OpenFOAM field class"))
+    field_class = Symbol(cls_m.captures[1])
+
+    obj_m = match(r"object\s+([A-Za-z0-9_.-]+)\s*;", txt)
+    field_name = obj_m === nothing ? "C_substrate" : obj_m.captures[1]
+
+    dim_m = match(r"dimensions\s*\[\s*([^\]]+)\s*\]\s*;", txt)
+    dim_m !== nothing || throw(ArgumentError("OpenFOAM dictionary is missing dimensions [...]"))
+    dim_tokens = split(strip(dim_m.captures[1]))
+    length(dim_tokens) == 7 ||
+        throw(ArgumentError("OpenFOAM dimensions must contain exactly 7 integers"))
+    dims = NTuple{7,Int}(Tuple(parse(Int, t) for t in dim_tokens))
+
+    n_cells = length(cell_volumes_m3)
+    internal_mat = Matrix{Float64}(undef, n_cells, field_class == :volScalarField ? 1 : 3)
+
+    if field_class == :volScalarField
+        unif_m = match(r"internalField\s+uniform\s+([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*;", txt)
+        if unif_m !== nothing
+            val = parse(Float64, unif_m.captures[1])
+            fill!(internal_mat, val)
+        else
+            nonunif_m = match(r"internalField\s+nonuniform\s+List<scalar>\s+(\d+)\s*\(\s*([^)]*)\)\s*;", txt)
+            nonunif_m !== nothing ||
+                throw(ArgumentError("unable to parse OpenFOAM scalar internalField"))
+            n_declared = parse(Int, nonunif_m.captures[1])
+            n_declared == n_cells ||
+                throw(ArgumentError("OpenFOAM internalField count ($n_declared) does not match mesh cell count ($n_cells)"))
+            val_tokens = split(strip(nonunif_m.captures[2]))
+            length(val_tokens) == n_cells ||
+                throw(ArgumentError("OpenFOAM scalar list length ($(length(val_tokens))) does not match $n_cells"))
+            for i in 1:n_cells
+                internal_mat[i, 1] = parse(Float64, val_tokens[i])
+            end
+        end
+    else
+        unif_v = match(r"internalField\s+uniform\s*\(\s*([^\)]+)\s*\)\s*;", txt)
+        if unif_v !== nothing
+            vparts = split(strip(unif_v.captures[1]))
+            length(vparts) == 3 || throw(ArgumentError("uniform vector must have 3 components"))
+            v1, v2, v3 = parse(Float64, vparts[1]), parse(Float64, vparts[2]), parse(Float64, vparts[3])
+            for i in 1:n_cells
+                internal_mat[i, 1] = v1
+                internal_mat[i, 2] = v2
+                internal_mat[i, 3] = v3
+            end
+        else
+            nonunif_v = match(r"internalField\s+nonuniform\s+List<vector>\s+(\d+)\s*\(\s*(.*?)\s*\)\s*;"s, txt)
+            nonunif_v !== nothing ||
+                throw(ArgumentError("unable to parse OpenFOAM vector internalField"))
+            n_declared = parse(Int, nonunif_v.captures[1])
+            n_declared == n_cells ||
+                throw(ArgumentError("OpenFOAM vector internalField count ($n_declared) does not match mesh cell count ($n_cells)"))
+            vec_matches = collect(eachmatch(r"\(\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s+([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s+([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*\)", nonunif_v.captures[2]))
+            length(vec_matches) == n_cells ||
+                throw(ArgumentError("parsed $(length(vec_matches)) vectors, expected $n_cells"))
+            for i in 1:n_cells
+                internal_mat[i, 1] = parse(Float64, vec_matches[i].captures[1])
+                internal_mat[i, 2] = parse(Float64, vec_matches[i].captures[2])
+                internal_mat[i, 3] = parse(Float64, vec_matches[i].captures[3])
+            end
+        end
+    end
+
+    patches = OpenFOAMBoundaryPatch[]
+    bf_m = match(r"boundaryField\s*\{(.*)\}\s*\z"s, txt)
+    if bf_m !== nothing
+        bf_body = bf_m.captures[1]
+        for pm in eachmatch(r"([A-Za-z0-9_.-]+)\s*\{([^{}]*)\}", bf_body)
+            pname = pm.captures[1]
+            pbody = pm.captures[2]
+            tm = match(r"type\s+([A-Za-z0-9_]+)\s*;", pbody)
+            ptype = tm === nothing ? :zeroGradient : Symbol(tm.captures[1])
+            fm = match(r"flux_mol_s\s+([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*;", pbody)
+            flx = fm === nothing ? 0.0 : parse(Float64, fm.captures[1])
+            vm = match(r"value\s+nonuniform\s+List<scalar>\s+\d+\s*\(\s*([^)]*)\)\s*;", pbody)
+            vals = vm === nothing ? Float64[] : [parse(Float64, s) for s in split(strip(vm.captures[1])) if !isempty(s)]
+            push!(patches, OpenFOAMBoundaryPatch(pname, ptype, vals; flux_mol_s=flx))
+        end
+    end
+
+    digest = bytes2hex(SHA.sha256(txt))
+    return OpenFOAMMeshExchange(
+        vessel_id = vessel_id,
+        time_h = time_h,
+        timestep_s = timestep_s,
+        compartment = compartment,
+        mesh_id = mesh_id,
+        solver_version = solver_version,
+        field_name = field_name,
+        field_class = field_class,
+        dimensions = dims,
+        cell_centers_m = cell_centers_m,
+        cell_volumes_m3 = cell_volumes_m3,
+        internal_field = internal_mat,
+        boundary_patches = patches,
+        velocity_magnitudes_m_s = velocity_magnitudes_m_s,
+        diffusivities_m2_s = diffusivities_m2_s,
+        epistemic_status = epistemic_status,
+        source_sha256 = digest
+    )
+end
+
+"""
+Conservative volume-weighted field mapping from an OpenFOAM mesh (`source`) to
+Julia biological compartments or coarse mesh cells with volumes `target_volumes_m3`.
+
+`overlap_weights[j, i]` is the fraction of source cell `i`'s volume mapped into
+target compartment `j`. Each column `i` must sum to 1 (partition of unity) and
+`overlap_weights * source.cell_volumes_m3` must equal `target_volumes_m3`.
+"""
+function map_openfoam_field_conservative(
+        source::OpenFOAMMeshExchange,
+        target_volumes_m3::AbstractVector{<:Real},
+        overlap_weights::AbstractMatrix{<:Real};
+        atol::Real=1e-8)
+    n_src = length(source.cell_volumes_m3)
+    n_tgt = length(target_volumes_m3)
+    n_tgt >= 1 || throw(ArgumentError("target_volumes_m3 must be non-empty"))
+    size(overlap_weights) == (n_tgt, n_src) ||
+        throw(ArgumentError("overlap_weights must have size (n_target, n_source) = ($n_tgt, $n_src)"))
+    tol = Float64(atol)
+    tol >= 0 || throw(ArgumentError("atol must be >= 0"))
+
+    tgt_vols = Float64.(target_volumes_m3)
+    all(v -> isfinite(v) && v > 0, tgt_vols) ||
+        throw(ArgumentError("target_volumes_m3 entries must be finite and > 0"))
+    W = Float64.(overlap_weights)
+    all(w -> isfinite(w) && w >= -tol, W) ||
+        throw(ArgumentError("overlap_weights must be finite and nonnegative"))
+
+    for i in 1:n_src
+        col_sum = sum(@view W[:, i])
+        isapprox(col_sum, 1.0; atol=max(tol, 1e-7), rtol=1e-7) ||
+            throw(ArgumentError("overlap_weights column $i sums to $col_sum != 1.0 (violates mass conservation)"))
+    end
+
+    implied_tgt_vols = W * source.cell_volumes_m3
+    for j in 1:n_tgt
+        isapprox(implied_tgt_vols[j], tgt_vols[j]; atol=1e-24, rtol=max(tol, 1e-6)) ||
+            throw(ArgumentError("target volume $j ($(tgt_vols[j])) does not match overlapped source volume ($(implied_tgt_vols[j]))"))
+    end
+
+    n_comp = size(source.internal_field, 2)
+    mapped = zeros(Float64, n_tgt, n_comp)
+    src_totals = zeros(Float64, n_comp)
+    tgt_totals = zeros(Float64, n_comp)
+
+    for c in 1:n_comp
+        for i in 1:n_src
+            src_totals[c] += source.internal_field[i, c] * source.cell_volumes_m3[i]
+        end
+        for j in 1:n_tgt
+            amt_j = 0.0
+            for i in 1:n_src
+                amt_j += W[j, i] * source.cell_volumes_m3[i] * source.internal_field[i, c]
+            end
+            mapped[j, c] = amt_j / tgt_vols[j]
+            tgt_totals[c] += mapped[j, c] * tgt_vols[j]
+        end
+    end
+
+    max_rel_err = maximum(
+        abs(src_totals[c] - tgt_totals[c]) / max(abs(src_totals[c]), 1e-15)
+        for c in 1:n_comp
+    )
+    conserved = max_rel_err <= max(tol, 1e-9)
+    return (
+        mapped_field = mapped,
+        source_totals = src_totals,
+        target_totals = tgt_totals,
+        mass_conserved = conserved,
+        max_relative_mass_error = max_rel_err
+    )
+end
+
+"""
+Audit OpenFOAM transport numerical stability, Courant-Friedrichs-Lewy (CFL)
+number, grid Peclet number, nonnegativity, and integrated mass/flux balance.
+"""
+function audit_openfoam_transport_stability(
+        ex::OpenFOAMMeshExchange;
+        max_courant::Real=1.0,
+        max_peclet::Real=50.0,
+        require_nonnegative::Bool=true)
+    co_lim = Float64(max_courant)
+    pe_lim = Float64(max_peclet)
+    co_lim > 0 && pe_lim > 0 ||
+        throw(ArgumentError("max_courant and max_peclet must be > 0"))
+
+    n = length(ex.cell_volumes_m3)
+    max_co = 0.0
+    max_pe = 0.0
+    for i in 1:n
+        dx = cbrt(ex.cell_volumes_m3[i])
+        u = ex.velocity_magnitudes_m_s[i]
+        d = ex.diffusivities_m2_s[i]
+        co_i = (u * ex.timestep_s) / dx
+        pe_i = u > 0 ? (u * dx) / max(d, 1e-18) : 0.0
+        if co_i > max_co
+            max_co = co_i
+        end
+        if pe_i > max_pe
+            max_pe = pe_i
+        end
+    end
+
+    min_val = minimum(ex.internal_field)
+    max_val = maximum(ex.internal_field)
+    total_amt = sum(ex.internal_field[i, 1] * ex.cell_volumes_m3[i] for i in 1:n)
+    net_flux = isempty(ex.boundary_patches) ? 0.0 : sum(p.flux_mol_s for p in ex.boundary_patches)
+
+    nonneg_ok = (!require_nonnegative) || (min_val >= -1e-12)
+    stable = (max_co <= co_lim) && (max_pe <= pe_lim) && nonneg_ok
+    return (
+        stable = stable,
+        max_courant_observed = max_co,
+        max_peclet_observed = max_pe,
+        min_field_value = min_val,
+        max_field_value = max_val,
+        total_integrated_amount = total_amt,
+        net_boundary_flux_mol_s = net_flux
+    )
+end
+
+"""
+Summarize a spatial `OpenFOAMMeshExchange` snapshot into a volume-weighted
+scalar `OpenFOAMTransportSnap` for compartment-level observation alignment.
+"""
+function summarize_openfoam_mesh_to_snap(
+        ex::OpenFOAMMeshExchange;
+        wall_shear_pa::Real=0.25,
+        residence_time_s::Union{Nothing,Real}=nothing,
+        detachment_flux_cells_m2_s::Real=0.0)
+    tot_vol = sum(ex.cell_volumes_m3)
+    mean_vel = sum(ex.velocity_magnitudes_m_s[i] * ex.cell_volumes_m3[i] for i in eachindex(ex.cell_volumes_m3)) / tot_vol
+    char_len = cbrt(tot_vol)
+    rt = residence_time_s === nothing ? (char_len / max(mean_vel, 1e-6)) : Float64(residence_time_s)
+    return OpenFOAMTransportSnap(
+        ex.vessel_id, ex.time_h, ex.compartment;
+        velocity_m_s = mean_vel,
+        wall_shear_pa = wall_shear_pa,
+        residence_time_s = rt,
+        detachment_flux_cells_m2_s = detachment_flux_cells_m2_s
+    )
+end
+
+# ---------------------------------------------------------------------------
+# M2: Full-species PHREEQC geochemical snapshot adapter and balance audits
+# ---------------------------------------------------------------------------
+
+struct PHREEQCMineralPhase
+    name::String
+    formula::String
+    saturation_index::Float64
+    moles_mol_L::Float64
+    delta_moles_mol_L::Float64
+
+    function PHREEQCMineralPhase(name::AbstractString,
+                                 formula::AbstractString;
+                                 saturation_index::Real,
+                                 moles_mol_L::Real=0.0,
+                                 delta_moles_mol_L::Real=0.0)
+        nm = String(strip(name))
+        fm = String(strip(formula))
+        !isempty(nm) && !isempty(fm) ||
+            throw(ArgumentError("mineral phase name and formula must be non-empty"))
+        si = Float64(saturation_index)
+        m = Float64(moles_mol_L)
+        dm = Float64(delta_moles_mol_L)
+        isfinite(si) && isfinite(m) && m >= 0 && isfinite(dm) ||
+            throw(ArgumentError("invalid mineral phase numerical values"))
+        new(nm, fm, si, m, dm)
+    end
+end
+
+"""
+Full-species PHREEQC aqueous speciation and mineral equilibrium snapshot
+(`PHREEQCSpeciesAdapter`). PHREEQC owns aqueous equilibrium, activity
+coefficients, charge balance, and saturation indices; it does not own
+quorum-sensing regulation or biofilm mechanics.
+"""
+struct PHREEQCSpeciesAdapter
+    vessel_id::String
+    time_h::Float64
+    compartment::Symbol
+    solver_version::String
+    database_name::String
+    temperature_c::Float64
+    pH::Float64
+    pe::Float64
+    eh_volts::Float64
+    ionic_strength_M::Float64
+    species_molalities_mol_kgw::Dict{String,Float64}
+    species_charges::Dict{String,Int}
+    species_activity_coeffs::Dict{String,Float64}
+    element_totals_mol_kgw::Dict{String,Float64}
+    species_stoichiometry::Dict{String,Dict{String,Float64}}
+    mineral_phases::Vector{PHREEQCMineralPhase}
+    epistemic_status::Symbol
+    source_sha256::String
+
+    function PHREEQCSpeciesAdapter(;
+            vessel_id::AbstractString,
+            time_h::Real,
+            compartment::Symbol=:effluent,
+            solver_version::AbstractString="PHREEQC-3.7.3",
+            database_name::AbstractString="phreeqc.dat",
+            temperature_c::Real=25.0,
+            pH::Real,
+            pe::Real,
+            eh_volts::Union{Nothing,Real}=nothing,
+            ionic_strength_M::Real,
+            species_molalities_mol_kgw::Dict{String,<:Real},
+            species_charges::Dict{String,<:Integer},
+            species_activity_coeffs::Dict{String,<:Real}=Dict{String,Float64}(),
+            element_totals_mol_kgw::Dict{String,<:Real}=Dict{String,Float64}(),
+            species_stoichiometry::Dict{String,<:Dict{String,<:Real}}=Dict{String,Dict{String,Float64}}(),
+            mineral_phases::AbstractVector{PHREEQCMineralPhase}=PHREEQCMineralPhase[],
+            epistemic_status::Symbol=:predicted,
+            source_sha256::AbstractString="")
+        vid = String(strip(vessel_id))
+        sver = String(strip(solver_version))
+        db = String(strip(database_name))
+        !isempty(vid) && !isempty(sver) && !isempty(db) ||
+            throw(ArgumentError("vessel_id, solver_version, and database_name must be non-empty"))
+        compartment in VALID_SAMPLE_ORIGINS ||
+            throw(ArgumentError("compartment must be one of $(VALID_SAMPLE_ORIGINS)"))
+        epistemic_status in VALID_EPISTEMIC_STATUSES ||
+            throw(ArgumentError("epistemic_status must be one of $(VALID_EPISTEMIC_STATUSES)"))
+
+        th = Float64(time_h)
+        tc = Float64(temperature_c)
+        ph_v = Float64(pH)
+        pe_v = Float64(pe)
+        is_v = Float64(ionic_strength_M)
+        isfinite(th) && th >= 0 || throw(ArgumentError("time_h must be finite and >= 0"))
+        isfinite(tc) && tc > -273.15 || throw(ArgumentError("temperature_c must be > -273.15"))
+        isfinite(ph_v) && 0 <= ph_v <= 14 || throw(ArgumentError("pH must be in [0, 14]"))
+        isfinite(pe_v) || throw(ArgumentError("pe must be finite"))
+        isfinite(is_v) && is_v >= 0 || throw(ArgumentError("ionic_strength_M must be finite and >= 0"))
+
+        nernst_factor = (8.314462618 * (tc + 273.15) * log(10.0)) / 96485.33212
+        eh_v = eh_volts === nothing ? (nernst_factor * pe_v) : Float64(eh_volts)
+        isfinite(eh_v) || throw(ArgumentError("eh_volts must be finite"))
+
+        !isempty(species_molalities_mol_kgw) ||
+            throw(ArgumentError("species_molalities_mol_kgw must be non-empty"))
+        mol_dict = Dict{String,Float64}()
+        chg_dict = Dict{String,Int}()
+        act_dict = Dict{String,Float64}()
+        for (sp, m_raw) in species_molalities_mol_kgw
+            m_val = Float64(m_raw)
+            isfinite(m_val) && m_val >= 0 ||
+                throw(ArgumentError("species '$sp' molality must be finite and >= 0"))
+            haskey(species_charges, sp) ||
+                throw(ArgumentError("missing ionic charge for species '$sp' in species_charges"))
+            mol_dict[sp] = m_val
+            chg_dict[sp] = Int(species_charges[sp])
+            gam = Float64(get(species_activity_coeffs, sp, 1.0))
+            isfinite(gam) && gam > 0 ||
+                throw(ArgumentError("activity coefficient for '$sp' must be finite and > 0"))
+            act_dict[sp] = gam
+        end
+
+        elem_dict = Dict{String,Float64}()
+        for (el, tot_raw) in element_totals_mol_kgw
+            t_val = Float64(tot_raw)
+            isfinite(t_val) && t_val >= 0 ||
+                throw(ArgumentError("element '$el' total molality must be finite and >= 0"))
+            elem_dict[el] = t_val
+        end
+
+        stoich_dict = Dict{String,Dict{String,Float64}}()
+        for (sp, el_map) in species_stoichiometry
+            inner = Dict{String,Float64}()
+            for (el, coeff) in el_map
+                c_val = Float64(coeff)
+                isfinite(c_val) && c_val >= 0 ||
+                    throw(ArgumentError("stoichiometric coefficient for '$el' in '$sp' must be >= 0"))
+                inner[el] = c_val
+            end
+            stoich_dict[sp] = inner
+        end
+
+        minerals = collect(PHREEQCMineralPhase, mineral_phases)
+        digest = if isempty(strip(source_sha256))
+            bytes2hex(SHA.sha256(string(vid, ":", th, ":", ph_v, ":", pe_v, ":", is_v, ":", length(mol_dict))))
+        else
+            d = lowercase(strip(String(source_sha256)))
+            occursin(r"^[0-9a-f]{64}$", d) ||
+                throw(ArgumentError("source_sha256 must be a valid 64-character lowercase hex SHA-256 digest"))
+            d
+        end
+
+        new(vid, th, compartment, sver, db, tc, ph_v, pe_v, eh_v, is_v,
+            mol_dict, chg_dict, act_dict, elem_dict, stoich_dict, minerals,
+            epistemic_status, digest)
+    end
+end
+
+"""
+Audit charge balance, element conservation, ionic strength, Nernst Eh-pe
+consistency, pH activity consistency, and mineral saturation states for a
+`PHREEQCSpeciesAdapter`.
+"""
+function audit_phreeqc_speciation_balance(
+        adapter::PHREEQCSpeciesAdapter;
+        max_charge_imbalance_pct::Real=2.0,
+        rtol_element::Real=1e-4,
+        rtol_ionic_strength::Real=0.05,
+        atol_eh_volts::Real=0.005)
+    max_ci = Float64(max_charge_imbalance_pct)
+    rtol_el = Float64(rtol_element)
+    rtol_is = Float64(rtol_ionic_strength)
+    atol_eh = Float64(atol_eh_volts)
+
+    pos_eq = 0.0
+    neg_eq = 0.0
+    calc_is = 0.0
+    activities = Dict{String,Float64}()
+
+    for (sp, m) in adapter.species_molalities_mol_kgw
+        z = adapter.species_charges[sp]
+        gam = adapter.species_activity_coeffs[sp]
+        activities[sp] = gam * m
+        if z > 0
+            pos_eq += z * m
+        elseif z < 0
+            neg_eq += abs(z) * m
+        end
+        calc_is += 0.5 * (z * z) * m
+    end
+
+    net_charge = pos_eq - neg_eq
+    denom_charge = pos_eq + neg_eq
+    charge_pct = denom_charge > 0 ? (100.0 * abs(net_charge) / denom_charge) : 0.0
+    charge_ok = charge_pct <= max_ci
+
+    is_ok = isapprox(calc_is, adapter.ionic_strength_M; rtol=rtol_is, atol=1e-5)
+
+    max_el_rel_err = 0.0
+    elem_ok = true
+    if !isempty(adapter.element_totals_mol_kgw) && !isempty(adapter.species_stoichiometry)
+        for (el, tot_expected) in adapter.element_totals_mol_kgw
+            tot_calc = 0.0
+            for (sp, m) in adapter.species_molalities_mol_kgw
+                if haskey(adapter.species_stoichiometry, sp) && haskey(adapter.species_stoichiometry[sp], el)
+                    tot_calc += adapter.species_stoichiometry[sp][el] * m
+                end
+            end
+            rel_err = abs(tot_calc - tot_expected) / max(tot_expected, 1e-15)
+            if rel_err > max_el_rel_err
+                max_el_rel_err = rel_err
+            end
+            if rel_err > rtol_el
+                elem_ok = false
+            end
+        end
+    end
+
+    nernst_factor = (8.314462618 * (adapter.temperature_c + 273.15) * log(10.0)) / 96485.33212
+    expected_eh = nernst_factor * adapter.pe
+    eh_ok = abs(adapter.eh_volts - expected_eh) <= atol_eh
+
+    ph_ok = true
+    if haskey(activities, "H+") && activities["H+"] > 0
+        ph_from_act = -log10(activities["H+"])
+        ph_ok = abs(ph_from_act - adapter.pH) <= 0.08
+    end
+
+    supersat = [m.name for m in adapter.mineral_phases if m.saturation_index > 0.0]
+    undersat = [m.name for m in adapter.mineral_phases if m.saturation_index < 0.0]
+
+    return (
+        consistent = charge_ok && is_ok && elem_ok && eh_ok && ph_ok,
+        charge_balance_eq_kgw = net_charge,
+        charge_imbalance_pct = charge_pct,
+        charge_balance_ok = charge_ok,
+        computed_ionic_strength_M = calc_is,
+        ionic_strength_consistent = is_ok,
+        element_balance_consistent = elem_ok,
+        max_element_rel_error = max_el_rel_err,
+        nernst_eh_consistent = eh_ok,
+        ph_activity_consistent = ph_ok,
+        activities_mol_kgw = activities,
+        supersaturated_minerals = supersat,
+        undersaturated_minerals = undersat
+    )
+end
+
+"""
+Serialize a `PHREEQCSpeciesAdapter` into a machine-readable PHREEQC
+selected-output key-value table.
+"""
+function serialize_phreeqc_selected_output(adapter::PHREEQCSpeciesAdapter)
+    sp_names = sort!(collect(keys(adapter.species_molalities_mol_kgw)))
+    el_names = sort!(collect(keys(adapter.element_totals_mol_kgw)))
+
+    headers = String[
+        "vessel_id", "time_h", "compartment", "solver_version", "database_name",
+        "temperature_c", "pH", "pe", "eh_volts", "ionic_strength_M"
+    ]
+    vals = String[
+        adapter.vessel_id,
+        @sprintf("%.10g", adapter.time_h),
+        String(adapter.compartment),
+        adapter.solver_version,
+        adapter.database_name,
+        @sprintf("%.10g", adapter.temperature_c),
+        @sprintf("%.10g", adapter.pH),
+        @sprintf("%.10g", adapter.pe),
+        @sprintf("%.10g", adapter.eh_volts),
+        @sprintf("%.12g", adapter.ionic_strength_M)
+    ]
+
+    for sp in sp_names
+        push!(headers, "m_$(sp)")
+        push!(vals, @sprintf("%.12g", adapter.species_molalities_mol_kgw[sp]))
+    end
+    for el in el_names
+        push!(headers, "tot_$(el)")
+        push!(vals, @sprintf("%.12g", adapter.element_totals_mol_kgw[el]))
+    end
+    for mp in adapter.mineral_phases
+        push!(headers, "si_$(mp.name)")
+        push!(vals, @sprintf("%.10g", mp.saturation_index))
+        push!(headers, "min_moles_$(mp.name)")
+        push!(vals, @sprintf("%.10g", mp.moles_mol_L))
+        push!(headers, "min_delta_$(mp.name)")
+        push!(vals, @sprintf("%.10g", mp.delta_moles_mol_L))
+        push!(headers, "min_formula_$(mp.name)")
+        push!(vals, mp.formula)
+    end
+
+    return join(headers, "\t") * "\n" * join(vals, "\t") * "\n"
+end
+
+"""
+Parse a PHREEQC selected-output TSV/CSV table into a `PHREEQCSpeciesAdapter`.
+"""
+function parse_phreeqc_selected_output(
+        table_text::AbstractString;
+        species_charges::Dict{String,<:Integer},
+        species_activity_coeffs::Dict{String,<:Real}=Dict{String,Float64}(),
+        species_stoichiometry::Dict{String,<:Dict{String,<:Real}}=Dict{String,Dict{String,Float64}}(),
+        epistemic_status::Symbol=:predicted)
+    lines = [strip(l) for l in split(chomp(String(table_text)), '\n') if !isempty(strip(l))]
+    length(lines) >= 2 || throw(ArgumentError("PHREEQC selected-output table must have header and data row"))
+    delim = occursin('\t', lines[1]) ? '\t' : ','
+    hdrs = [strip(h) for h in split(lines[1], delim)]
+    row  = [strip(v) for v in split(lines[2], delim)]
+    length(hdrs) == length(row) ||
+        throw(ArgumentError("PHREEQC selected-output header column count ($(length(hdrs))) != row count ($(length(row)))"))
+
+    kv = Dict{String,String}(hdrs[i] => row[i] for i in eachindex(hdrs))
+    vid = get(kv, "vessel_id", "UNSPECIFIED")
+    th  = parse(Float64, get(kv, "time_h", "0.0"))
+    comp = Symbol(get(kv, "compartment", "effluent"))
+    sver = get(kv, "solver_version", "PHREEQC-3.7.3")
+    db   = get(kv, "database_name", "phreeqc.dat")
+    tc   = parse(Float64, get(kv, "temperature_c", "25.0"))
+    ph_v = parse(Float64, kv["pH"])
+    pe_v = parse(Float64, kv["pe"])
+    eh_v = haskey(kv, "eh_volts") ? parse(Float64, kv["eh_volts"]) : nothing
+    is_v = parse(Float64, kv["ionic_strength_M"])
+
+    mol_dict = Dict{String,Float64}()
+    elem_dict = Dict{String,Float64}()
+    min_names = String[]
+
+    for h in hdrs
+        if startswith(h, "m_")
+            sp = h[3:end]
+            mol_dict[sp] = parse(Float64, kv[h])
+        elseif startswith(h, "tot_")
+            el = h[5:end]
+            elem_dict[el] = parse(Float64, kv[h])
+        elseif startswith(h, "si_")
+            push!(min_names, h[4:end])
+        end
+    end
+
+    minerals = PHREEQCMineralPhase[]
+    for mname in min_names
+        si = parse(Float64, kv["si_$(mname)"])
+        moles = haskey(kv, "min_moles_$(mname)") ? parse(Float64, kv["min_moles_$(mname)"]) : 0.0
+        dmoles = haskey(kv, "min_delta_$(mname)") ? parse(Float64, kv["min_delta_$(mname)"]) : 0.0
+        form = get(kv, "min_formula_$(mname)", mname)
+        push!(minerals, PHREEQCMineralPhase(mname, form;
+            saturation_index=si, moles_mol_L=moles, delta_moles_mol_L=dmoles))
+    end
+
+    digest = bytes2hex(SHA.sha256(String(table_text)))
+    return PHREEQCSpeciesAdapter(
+        vessel_id = vid,
+        time_h = th,
+        compartment = comp,
+        solver_version = sver,
+        database_name = db,
+        temperature_c = tc,
+        pH = ph_v,
+        pe = pe_v,
+        eh_volts = eh_v,
+        ionic_strength_M = is_v,
+        species_molalities_mol_kgw = mol_dict,
+        species_charges = Dict{String,Int}(k => Int(v) for (k, v) in species_charges),
+        species_activity_coeffs = Dict{String,Float64}(k => Float64(v) for (k, v) in species_activity_coeffs),
+        element_totals_mol_kgw = elem_dict,
+        species_stoichiometry = Dict{String,Dict{String,Float64}}(
+            sp => Dict{String,Float64}(el => Float64(c) for (el, c) in emap)
+            for (sp, emap) in species_stoichiometry
+        ),
+        mineral_phases = minerals,
+        epistemic_status = epistemic_status,
+        source_sha256 = digest
+    )
+end
+
+"""
+Summarize a full-species `PHREEQCSpeciesAdapter` into a scalar `PHREEQCSpeciationSnap`
+for backward-compatible observation model coupling.
+"""
+function summarize_phreeqc_adapter_to_snap(adapter::PHREEQCSpeciesAdapter)
+    m = adapter.species_molalities_mol_kgw
+    t = adapter.element_totals_mol_kgw
+    ca = get(t, "Ca", get(m, "Ca+2", 0.0))
+    mg = get(t, "Mg", get(m, "Mg+2", 0.0))
+    fe2 = get(m, "Fe+2", get(t, "Fe", 0.0))
+    sulf = get(m, "HS-", 0.0) + get(m, "H2S", 0.0) + get(m, "S-2", 0.0)
+    return PHREEQCSpeciationSnap(
+        adapter.vessel_id, adapter.time_h;
+        pH = adapter.pH,
+        pe = adapter.pe,
+        ionic_strength_M = adapter.ionic_strength_M,
+        ca_mol_L = ca,
+        mg_mol_L = mg,
+        fe2_mol_L = fe2,
+        sulfide_mol_L = sulf
+    )
+end
+
+"""
+Verify that OpenFOAM transport and PHREEQC speciation snapshots (scalar or
+mesh/species-level) match the cytometry sample's vessel, time point, and
+compartment before coupling.
 """
 function validate_solver_observation_alignment(sample::FCMSampleSummary,
                                                sample_vessel_id::AbstractString,
                                                sample_time_h::Real;
                                                transport::Union{Nothing,OpenFOAMTransportSnap}=nothing,
                                                chemistry::Union{Nothing,PHREEQCSpeciationSnap}=nothing,
+                                               mesh_transport::Union{Nothing,OpenFOAMMeshExchange}=nothing,
+                                               species_chemistry::Union{Nothing,PHREEQCSpeciesAdapter}=nothing,
                                                atol_time_h::Real=1e-6)
     vid = String(strip(sample_vessel_id))
     !isempty(vid) || throw(ArgumentError("sample_vessel_id must be non-empty"))
@@ -1206,6 +2091,22 @@ function validate_solver_observation_alignment(sample::FCMSampleSummary,
         isapprox(chemistry.time_h, th; atol=atol_t, rtol=0.0) ||
             throw(ArgumentError("PHREEQC time_h ($(chemistry.time_h)) does not match sample time_h ($th)"))
     end
+    if mesh_transport !== nothing
+        mesh_transport.vessel_id == vid ||
+            throw(ArgumentError("OpenFOAMMeshExchange vessel_id ($(mesh_transport.vessel_id)) does not match sample vessel_id ($vid)"))
+        isapprox(mesh_transport.time_h, th; atol=atol_t, rtol=0.0) ||
+            throw(ArgumentError("OpenFOAMMeshExchange time_h ($(mesh_transport.time_h)) does not match sample time_h ($th)"))
+        mesh_transport.compartment == sample.sample_origin ||
+            throw(ArgumentError("OpenFOAMMeshExchange compartment ($(mesh_transport.compartment)) does not match sample_origin ($(sample.sample_origin))"))
+    end
+    if species_chemistry !== nothing
+        species_chemistry.vessel_id == vid ||
+            throw(ArgumentError("PHREEQCSpeciesAdapter vessel_id ($(species_chemistry.vessel_id)) does not match sample vessel_id ($vid)"))
+        isapprox(species_chemistry.time_h, th; atol=atol_t, rtol=0.0) ||
+            throw(ArgumentError("PHREEQCSpeciesAdapter time_h ($(species_chemistry.time_h)) does not match sample time_h ($th)"))
+        species_chemistry.compartment == sample.sample_origin ||
+            throw(ArgumentError("PHREEQCSpeciesAdapter compartment ($(species_chemistry.compartment)) does not match sample_origin ($(sample.sample_origin))"))
+    end
     return true
 end
 
@@ -1219,6 +2120,159 @@ function validate_sample_csv_header(header_line::AbstractString)
     isempty(missing_cols) ||
         throw(ArgumentError("CSV header is missing required columns: $(join(missing_cols, ", "))"))
     return true
+end
+
+# ---------------------------------------------------------------------------
+# M5: Empirical validation protocol separating synthetic software checks
+#     from real experimental generalization and internalization claims
+# ---------------------------------------------------------------------------
+
+"""
+Explicit empirical validation contract (`EmpiricalValidationProtocol`) that
+separates internal software verification on synthetic data from empirical
+generalization on de-identified, expert-reviewed experimental runs.
+"""
+struct EmpiricalValidationProtocol
+    protocol_id::String
+    track::Symbol
+    data_provenance::Symbol
+    independent_reference_labels::Bool
+    clay_matrix_blank_verified::Bool
+    counting_beads_verified::Bool
+    extraction_recovery_verified::Bool
+    internalization_imaging_verified::Bool
+    n_independent_runs::Int
+    n_heldout_runs::Int
+    external_solvers_coupled_in_production::Bool
+
+    function EmpiricalValidationProtocol(;
+            protocol_id::AbstractString="EMP-VAL-001",
+            track::Symbol=:track1_nanobio,
+            data_provenance::Symbol=:synthetic_simulation,
+            independent_reference_labels::Bool=false,
+            clay_matrix_blank_verified::Bool=false,
+            counting_beads_verified::Bool=true,
+            extraction_recovery_verified::Bool=false,
+            internalization_imaging_verified::Bool=false,
+            n_independent_runs::Integer=0,
+            n_heldout_runs::Integer=0,
+            external_solvers_coupled_in_production::Bool=false)
+        pid = String(strip(protocol_id))
+        !isempty(pid) || throw(ArgumentError("protocol_id must be non-empty"))
+        track in VALID_STAKEHOLDER_TRACKS ||
+            throw(ArgumentError("track must be one of $(VALID_STAKEHOLDER_TRACKS)"))
+        data_provenance in VALID_DATA_PROVENANCES ||
+            throw(ArgumentError("data_provenance must be one of $(VALID_DATA_PROVENANCES)"))
+        nir = Int(n_independent_runs)
+        nhr = Int(n_heldout_runs)
+        nir >= 0 && nhr >= 0 && nhr <= nir ||
+            throw(ArgumentError("require 0 <= n_heldout_runs <= n_independent_runs"))
+        if data_provenance == :synthetic_simulation && independent_reference_labels
+            throw(ArgumentError("synthetic_simulation provenance cannot claim independent_reference_labels = true"))
+        end
+        new(pid, track, data_provenance, independent_reference_labels,
+            clay_matrix_blank_verified, counting_beads_verified,
+            extraction_recovery_verified, internalization_imaging_verified,
+            nir, nhr, external_solvers_coupled_in_production)
+    end
+end
+
+"""
+Evaluate whether a model/classifier result establishes only software-level
+consistency (`software_verification_passed`) or genuine empirical generalization
+(`empirical_generalization_established`).
+
+Enforces:
+1. High synthetic cross-validation accuracy never implies empirical generalization.
+2. For `:nanocarrier_uptake`, a fluorescence-positive cytometry gate alone
+   cannot prove intracellular internalization without independent imaging/quenching
+   (`surface_association_only_warning = true`, `internalization_proven = false`).
+3. For `:track2_clay_corrosion`, clay-only matrix blanks, counting beads, and
+   extraction-recovery controls are mandatory before empirical readiness.
+4. Feature domain shift (`feature_psi_drift > max_allowed_psi`) blocks empirical
+   generalization claims.
+"""
+function evaluate_empirical_generalization_readiness(
+        protocol::EmpiricalValidationProtocol;
+        target_task::Symbol=:cell_stress_damage,
+        synthetic_accuracy::Real=0.95,
+        heldout_run_accuracy::Union{Nothing,Real}=nothing,
+        min_empirical_accuracy::Real=0.80,
+        feature_psi_drift::Real=0.0,
+        max_allowed_psi::Real=0.25)
+    sa = Float64(synthetic_accuracy)
+    0.0 <= sa <= 1.0 || throw(ArgumentError("synthetic_accuracy must be in [0, 1]"))
+    min_ea = Float64(min_empirical_accuracy)
+    0.0 < min_ea <= 1.0 || throw(ArgumentError("min_empirical_accuracy must be in (0, 1]"))
+    psi = Float64(feature_psi_drift)
+    max_psi = Float64(max_allowed_psi)
+    psi >= 0.0 && max_psi > 0.0 ||
+        throw(ArgumentError("feature_psi_drift must be >= 0 and max_allowed_psi > 0"))
+
+    software_ok = sa >= 0.80
+    domain_shift = psi > max_psi
+
+    uptake_task = (target_task == :nanocarrier_uptake)
+    surface_warning = uptake_task && !protocol.internalization_imaging_verified
+    internalization_ok = (!uptake_task) || protocol.internalization_imaging_verified
+
+    track2_controls_ok = if protocol.track == :track2_clay_corrosion
+        protocol.clay_matrix_blank_verified &&
+        protocol.counting_beads_verified &&
+        protocol.extraction_recovery_verified
+    else
+        protocol.counting_beads_verified
+    end
+
+    heldout_acc_val = heldout_run_accuracy === nothing ? 0.0 : Float64(heldout_run_accuracy)
+    if heldout_run_accuracy !== nothing
+        0.0 <= heldout_acc_val <= 1.0 ||
+            throw(ArgumentError("heldout_run_accuracy must be in [0, 1]"))
+    end
+
+    emp_ready = (protocol.data_provenance == :deidentified_experimental_fcs) &&
+                protocol.independent_reference_labels &&
+                (protocol.n_independent_runs >= 2) &&
+                (protocol.n_heldout_runs >= 1) &&
+                (heldout_run_accuracy !== nothing) &&
+                (heldout_acc_val >= min_ea) &&
+                (!domain_shift) &&
+                internalization_ok &&
+                track2_controls_ok
+
+    blockers = String[]
+    if protocol.data_provenance != :deidentified_experimental_fcs
+        push!(blockers, "data_provenance is :$(protocol.data_provenance) rather than :deidentified_experimental_fcs")
+    end
+    if !protocol.independent_reference_labels
+        push!(blockers, "independent assay reference labels have not been established")
+    end
+    if protocol.n_independent_runs < 2 || protocol.n_heldout_runs < 1
+        push!(blockers, "requires >= 2 independent experimental runs and >= 1 held-out run")
+    end
+    if heldout_run_accuracy === nothing || heldout_acc_val < min_ea
+        push!(blockers, "held-out experimental run accuracy is missing or below threshold ($min_ea)")
+    end
+    if domain_shift
+        push!(blockers, "feature domain shift detected (PSI = $(round(psi; digits=4)) > $max_psi)")
+    end
+    if surface_warning
+        push!(blockers, "fluorescence gate measures nanocarrier association/uptake; intracellular internalization is not proven without independent imaging")
+    end
+    if !track2_controls_ok
+        push!(blockers, "missing mandatory assay controls (counting beads, clay blank, or extraction recovery)")
+    end
+
+    return (
+        software_verification_passed = software_ok,
+        empirical_generalization_established = emp_ready,
+        domain_shift_detected = domain_shift,
+        surface_association_only_warning = surface_warning,
+        internalization_proven = uptake_task ? protocol.internalization_imaging_verified : false,
+        track_controls_verified = track2_controls_ok,
+        external_solvers_coupled_in_production = protocol.external_solvers_coupled_in_production,
+        blocking_reasons = blockers
+    )
 end
 
 # ---------------------------------------------------------------------------
