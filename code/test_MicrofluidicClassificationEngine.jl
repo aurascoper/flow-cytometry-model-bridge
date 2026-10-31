@@ -1017,10 +1017,33 @@ using .MicrofluidicClassificationEngine
         @test ENGINE_VERSION == "0.4.0"
 
         default_reg = build_default_biofilm_provenance_registry()
-        @test length(default_reg.entries) >= 12
-        @test haskey(default_reg.entries, :pga_osmotic_coeff_pa_m3_kg)
-        @test haskey(default_reg.entries, :curli_modulus_coeff_pa_m3_kg)
-        @test haskey(default_reg.entries, :min_droop_quota)
+        @test length(default_reg.entries) == 54
+        @test all(e -> e.physical_role != :unspecified, values(default_reg.entries))
+
+        # Verify every numeric parameter across all 6 biofilm structs + QSRegulatoryTopology is registered
+        required_symbols = [
+            :pga_kg_m3, :eps_kg_m3, :curli_kg_m3, :cellulose_kg_m3, :porosity,
+            :film_thickness_um, :film_thickness_m, :substrate_modulus_pa, :poisson_ratio,
+            :external_osmotic_pressure_pa, :pga_osmotic_coeff_pa_m3_kg, :eps_osmotic_coeff_pa_m3_kg,
+            :basal_gel_modulus_pa, :eps_modulus_coeff_pa_m3_kg, :curli_modulus_coeff_pa_m3_kg,
+            :cellulose_modulus_coeff_pa_m3_kg, :poroelastic_biot_modulus_pa, :viscoelastic_relaxation_time_s,
+            :aqueous_diffusivity_m2_s, :probe_radius_nm, :probe_charge_valence, :ionic_strength_mol_l,
+            :reference_mesh_size_nm, :reference_mesh_size_m, :curli_sieving_coeff, :charge_binding_coeff,
+            :electric_field_v_m, :ros_generation_factor, :k_electric_ros_s, :k_enzymatic_qq_s,
+            :matrix_shielding_coeff, :direct_electrochemical_fraction,
+            :direct_receptor_competition_coeff, :chemical_effector_inhibition_coeff,
+            :alkaline_lactonolysis_coeff, :alkaline_lactonolysis_coeff_s, :redox_modulation_coeff,
+            :activation_threshold_um, :hill_coefficient, :pqse_chaperone_coupling,
+            :nutrient_uptake_rate_mm_h, :nutrient_half_sat_mm, :min_droop_quota,
+            :quota_replenish_rate_h, :quota_consumption_rate_h, :ai_basal_synth_um_h,
+            :ai_induced_synth_um_h, :ai_natural_decay_h, :ev_basal_release_per_ml_h,
+            :ev_psm_induced_release_per_ml_h, :ev_psm_induced_release_per_m3_s,
+            :oxidative_stress_index, :fructose_flux_index, :vancomycin_exposure_ug_ml
+        ]
+        @test length(required_symbols) == 54
+        for sym in required_symbols
+            @test haskey(default_reg.entries, sym)
+        end
 
         g0_audit = audit_parameter_provenance_registry(default_reg; require_all_calibrated=false)
         @test g0_audit.gate_g0_dimensional_passed
@@ -1030,7 +1053,11 @@ using .MicrofluidicClassificationEngine
         # Because default registry includes assumed/uncalibrated entries (e.g. ev_psm_induced_release_per_m3_s),
         # it must not claim all_parameters_calibrated = true
         @test !g0_audit.all_parameters_calibrated
-        @test :ev_psm_induced_release_per_m3_s in g0_audit.uncalibrated_parameters
+        for uncal_sym in (:pga_kg_m3, :eps_kg_m3, :curli_kg_m3, :cellulose_kg_m3, :reference_mesh_size_nm, :reference_mesh_size_m, :curli_sieving_coeff, :pga_osmotic_coeff_pa_m3_kg, :ev_psm_induced_release_per_m3_s)
+            @test uncal_sym in g0_audit.uncalibrated_parameters
+            @test default_reg.entries[uncal_sym].source_status == :assumed
+            @test !default_reg.entries[uncal_sym].calibrated
+        end
     end
 
     # =======================================================================
@@ -1042,6 +1069,7 @@ using .MicrofluidicClassificationEngine
 
         # 1. Constitutive maturity level tagging and poroelastic/viscoelastic timescales
         spec_l1 = ThinFilmSwellingMechanicsSpec(constitutive_maturity_level=:level1_phenomenological_hypothesis)
+        @test spec_l1.constitutive_maturity_level isa ConstitutiveMaturityLevel
         spec_l3 = ThinFilmSwellingMechanicsSpec(
             constitutive_maturity_level=:level3_coupled_poroelastic_viscoelastic,
             poroelastic_biot_modulus_pa=3200.0,
@@ -1167,6 +1195,7 @@ using .MicrofluidicClassificationEngine
         @test !g_sa.allow_cross_species_edges
         @test "RNAIII" in g_sa.nodes && "alpha_PSM" in g_sa.nodes
         @test !("PqsE_Chaperone" in g_sa.nodes)
+        @test all(e -> !isempty(e.signal_molecule) && !isempty(e.receptor_target) && !isempty(e.environmental_conditions), g_sa.edges)
 
         @test g_pa.primary_species == :pseudomonas_aeruginosa
         @test !g_pa.allow_cross_species_edges
@@ -1175,6 +1204,28 @@ using .MicrofluidicClassificationEngine
         @test g_poly.primary_species == :polymicrobial_co_culture
         @test g_poly.allow_cross_species_edges
         @test length(g_poly.edges) > length(g_sa.edges) + length(g_pa.edges)
+        @test any(e -> e.sign == :inhibition, g_poly.edges)
+
+        # Explicit RegulatoryInteractionEdge construction with sign = :inhibition and full M6.4 metadata
+        inhib_edge = RegulatoryInteractionEdge(
+            source_node = "HQNO_Siderophore",
+            target_node = "AgrC_AgrA",
+            species_scope = :polymicrobial_shared,
+            signal_producer = :pseudomonas_aeruginosa,
+            signal_molecule = "HQNO + pyoverdine",
+            receiving_species = :staphylococcus_aureus,
+            receptor_target = "Cytochrome b / AgrCA respiratory regulon",
+            sign = :inhibition,
+            mechanism_class = :chemical_effector,
+            environmental_conditions = "Polymicrobial co-culture, pH 7.2, microaerobic",
+            parameter_uncertainty = (0.05, 0.45),
+            evidence_status = :calibrated,
+            citation = "Hotterbeekx et al. (2017) Front. Cell. Infect. Microbiol. 7:106"
+        )
+        @test inhib_edge.sign == :inhibition
+        @test inhib_edge.signal_producer == :pseudomonas_aeruginosa
+        @test inhib_edge.receiving_species == :staphylococcus_aureus
+        @test inhib_edge.parameter_uncertainty == (0.05, 0.45)
 
         # 2. Validate species applicability contract and catch cross-species Chimera errors
         params_sa_ok = BiofilmRegulatoryParams(
@@ -1275,6 +1326,24 @@ using .MicrofluidicClassificationEngine
         @test shift_mv.multivariate_shift_detected
         @test shift_mv.shifted
         @test shift_mv.recommended_abstention_policy in (:abstain_and_recalibrate, :elevated_deferral_threshold)
+
+        # High-dimensional d >> n regime (d = 40, n_tr = 12, n_ev = 6): adaptive Ledoit-Wolf shrinkage keeps
+        # sample covariance well-conditioned and detects OOD shift without false in-distribution inflation
+        X_hd_tr = randn(rng_mv, 12, 40)
+        X_hd_ev_in = randn(rng_mv, 6, 40)
+        X_hd_ev_ood = randn(rng_mv, 6, 40) .+ 3.5
+        shift_hd_in = detect_feature_domain_shift(
+            X_hd_tr, X_hd_ev_in;
+            feature_names = ["f_$j" for j in 1:40]
+        )
+        shift_hd_ood = detect_feature_domain_shift(
+            X_hd_tr, X_hd_ev_ood;
+            feature_names = ["f_$j" for j in 1:40]
+        )
+        @test isfinite(shift_hd_in.multivariate_mahalanobis_mean)
+        @test shift_hd_ood.multivariate_mahalanobis_mean > shift_hd_in.multivariate_mahalanobis_mean
+        @test shift_hd_ood.ood_event_fraction > 0.50
+        @test shift_hd_ood.shifted
 
         # 3. Stratified per-group ECE, minority-class recall, and biological replicate gates
         chip_tr = generate_synthetic_nanobio_fcs_dataset(

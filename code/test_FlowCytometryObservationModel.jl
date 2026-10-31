@@ -923,6 +923,15 @@ using .FlowCytometryObservationModel
         @test dim_ok.equation_homogeneity_ok
         @test isempty(dim_ok.mismatched_quantities)
 
+        # Specific volume (m^3/kg) and inverse molar concentration (m^3/mol) SI roles and 5 governing equations
+        q_sv = DimensionalQuantity("c_sieve", 0.018, "m^3/kg", (3, -1, 0, 0, 0, 0, 0); physical_role=:specific_volume_m3_kg)
+        q_inv_c = DimensionalQuantity("inv_c", 0.5, "m^3/mol", (3, 0, 0, 0, 0, -1, 0); physical_role=:inverse_molar_concentration_m3_mol)
+        dim_ext = audit_dimensional_consistency([q_c, q_d, q_p, q_sv, q_inv_c]; check_governing_equations=true)
+        @test dim_ext.consistent
+        @test dim_ext.gate_g0_passed
+        @test dim_ext.equation_homogeneity_ok
+        @test isempty(dim_ext.dimensional_audit_log)
+
         # Mismatched SI exponents for a declared physical role fails Gate G0 dimensional audit
         q_bad = DimensionalQuantity("C_wrong_units", 2.0, "m^3", (3, 0, 0, 0, 0, 0, 0); physical_role=:molar_concentration_mol_m3)
         dim_bad = audit_dimensional_consistency([q_c, q_bad]; check_governing_equations=true)
@@ -1050,6 +1059,9 @@ using .FlowCytometryObservationModel
         stab_aniso = audit_openfoam_transport_stability(ex_aniso; max_courant=0.50, max_peclet=10_000.0)
         @test isapprox(stab_aniso.max_directional_courant, 0.80; rtol=1e-10)
         @test isapprox(stab_aniso.max_isotropic_courant, 0.08; rtol=1e-10)
+        # Directional Peclet along fine x-axis: u_x * dx / D = 1e-3 * 1e-5 / 1e-10 = 100.0 (NOT 1e-3 * 1e-3 / 1e-10 = 10000.0)
+        @test isapprox(stab_aniso.max_directional_peclet, 100.0; rtol=1e-10)
+        @test isapprox(stab_aniso.max_isotropic_peclet, 1000.0; rtol=1e-10)
         @test stab_aniso.max_cell_aspect_ratio ≈ 100.0
         @test stab_aniso.anisotropic_instability_masked_by_isotropic
         # Because directional CFL = 0.80 > 0.50, stability audit rightly flags instability even though isotropic CFL = 0.08 < 0.50
@@ -1057,6 +1069,41 @@ using .FlowCytometryObservationModel
 
         stab_aniso_relaxed = audit_openfoam_transport_stability(ex_aniso; max_courant=1.0, max_peclet=10_000.0)
         @test stab_aniso_relaxed.stable
+
+        # Scalar-only velocity magnitude on an anisotropic cell thin in y (dx = 1e-3, dy = 1e-5, dz = 1e-3)
+        # must NOT fabricate x-aligned velocity vectors and must evaluate worst-case CFL against min_dx = dy = 1e-5
+        dims_y_thin = repeat([1.0e-3 1.0e-5 1.0e-3], n_cells, 1)
+        vols_y_thin = vec(prod(dims_y_thin; dims=2)) # 1.0e-11 m^3, h_iso = (1e-11)^(1/3) = 2.1544e-4 m
+        ex_scalar_y_thin = OpenFOAMMeshExchange(
+            vessel_id = "V-Y-THIN",
+            time_h = 24.0,
+            timestep_s = 0.008,
+            compartment = :detached_biofilm,
+            field_name = "C_nutrient",
+            field_class = :volScalarField,
+            cell_centers_m = centers,
+            cell_volumes_m3 = vols_y_thin,
+            cell_dimensions_m = dims_y_thin,
+            internal_field = conc_field,
+            velocity_magnitudes_m_s = fill(1.0e-3, n_cells),
+            diffusivities_m2_s = fill(1.0e-10, n_cells)
+        )
+        @test all(iszero, ex_scalar_y_thin.velocity_vectors_m_s)
+        stab_y_thin = audit_openfoam_transport_stability(ex_scalar_y_thin; max_courant=0.50, max_peclet=10_000.0)
+        @test isapprox(stab_y_thin.max_directional_courant, 0.80; rtol=1e-10)
+        @test isapprox(stab_y_thin.max_directional_peclet, 10000.0; rtol=1e-10)
+        @test stab_y_thin.anisotropic_instability_masked_by_isotropic
+        @test !stab_y_thin.stable
+
+        # Mismatched velocity_magnitudes_m_s vs velocity_vectors_m_s norm throws ArgumentError
+        @test_throws ArgumentError OpenFOAMMeshExchange(
+            vessel_id = "V-BAD-VEL", time_h = 24.0, timestep_s = 0.008,
+            compartment = :detached_biofilm, cell_centers_m = centers,
+            cell_volumes_m3 = vols, cell_dimensions_m = dims,
+            velocity_vectors_m_s = vel_vecs,
+            velocity_magnitudes_m_s = fill(5.0e-3, n_cells),
+            internal_field = conc_field
+        )
 
         # 2. Geometric overlap matrix from bounding boxes and reconstruction error audit
         # Target coarse mesh: 2 cells splitting the 4 fine cells along x at x = 2.0e-5 m
@@ -1114,6 +1161,7 @@ using .FlowCytometryObservationModel
             species_charges = Dict("Na+" => 1, "Ca+2" => 2, "Cl-" => -1, "H+" => 1, "OH-" => -1),
             database_name = "phreeqc.dat",
             database_version = "3.7.3",
+            thermodynamic_database = "phreeqc.dat v3.7.3",
             reference_electrode = :SHE,
             water_mass_kgw_per_L = 0.994,
             solution_density_kg_L = 1.005,
@@ -1130,8 +1178,10 @@ using .FlowCytometryObservationModel
                 )
             ]
         )
+        @test ph_she.thermodynamic_database == "phreeqc.dat v3.7.3"
         db_compat = verify_phreeqc_database_compatibility([ph_she]; expected_database="phreeqc.dat", expected_version="3.7.3")
         @test db_compat.compatible
+        @test db_compat.thermodynamic_database == "phreeqc.dat v3.7.3"
 
         # Mixing phreeqc.dat with pitzer.dat across snapshots throws an incompatibility error
         ph_pitzer = PHREEQCSpeciesAdapter(
@@ -1139,9 +1189,10 @@ using .FlowCytometryObservationModel
             pH = 7.0, pe = 2.0, ionic_strength_M = 1.2,
             species_molalities_mol_kgw = Dict("Na+" => 1.2, "Cl-" => 1.2),
             species_charges = Dict("Na+" => 1, "Cl-" => -1),
-            database_name = "pitzer.dat",
-            database_version = "3.7.3"
+            thermodynamic_database = "pitzer.dat v3.7.3"
         )
+        @test ph_pitzer.database_name == "pitzer.dat"
+        @test ph_pitzer.database_version == "3.7.3"
         @test_throws ArgumentError verify_phreeqc_database_compatibility([ph_she, ph_pitzer]; throw_on_mismatch=true)
         db_mix = verify_phreeqc_database_compatibility([ph_she, ph_pitzer]; throw_on_mismatch=false)
         @test !db_mix.compatible
@@ -1169,6 +1220,7 @@ using .FlowCytometryObservationModel
         # Audit separates kinetically verified precipitation (Calcite) from unverified supersaturation (Dolomite)
         audit_she = audit_phreeqc_speciation_balance(ph_she)
         @test audit_she.consistent
+        @test audit_she.thermodynamic_database == "phreeqc.dat v3.7.3"
         @test "Dolomite" in audit_she.supersaturated_without_kinetic_verification
         @test !("Calcite" in audit_she.supersaturated_without_kinetic_verification)
 

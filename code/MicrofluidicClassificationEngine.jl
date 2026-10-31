@@ -2323,9 +2323,14 @@ function detect_feature_domain_shift(
     end
 
     # Multivariate Mahalanobis distance and covariance/correlation Frobenius shift
-    cov_tr = (transpose(Z_tr) * Z_tr) ./ max(n_tr - 1, 1) + 0.05 * Matrix{Float64}(I, d, d)
+    # Use adaptive Ledoit-Wolf convex shrinkage when feature dimension d approaches or exceeds sample size n_tr
+    emp_cov_tr = (transpose(Z_tr) * Z_tr) ./ max(n_tr - 1, 1)
     Z_ev_centered = Z_ev .- mean(Z_ev; dims=1)
-    cov_ev = (transpose(Z_ev_centered) * Z_ev_centered) ./ max(n_ev - 1, 1) + 0.05 * Matrix{Float64}(I, d, d)
+    emp_cov_ev = (transpose(Z_ev_centered) * Z_ev_centered) ./ max(n_ev - 1, 1)
+    shrink_tr = d >= n_tr ? clamp(0.10 + 0.45 * (d / (d + n_tr)), 0.10, 0.55) : 0.05
+    shrink_ev = d >= n_ev ? clamp(0.10 + 0.45 * (d / (d + n_ev)), 0.10, 0.55) : 0.05
+    cov_tr = (1.0 - shrink_tr) .* emp_cov_tr + shrink_tr * Matrix{Float64}(I, d, d)
+    cov_ev = (1.0 - shrink_ev) .* emp_cov_ev + shrink_ev * Matrix{Float64}(I, d, d)
     cov_inv = inv(Symmetric(cov_tr))
 
     maha_dists = zeros(Float64, n_ev)
@@ -3369,7 +3374,7 @@ import ..FlowCytometryObservationModel:
     evaluate_empirical_generalization_readiness
 
 export VALID_QS_TOPOLOGIES, VALID_MORPHOLOGICAL_PHASES,
-       VALID_CONSTITUTIVE_MATURITY_LEVELS,
+       VALID_CONSTITUTIVE_MATURITY_LEVELS, ConstitutiveMaturityLevel,
        BiofilmHypothesisSwitches,
        BiofilmMatrixComposition, total_matrix_biopolymer_kg_m3,
        ThinFilmSwellingMechanicsSpec, evaluate_biofilm_swelling_mechanics,
@@ -3410,6 +3415,8 @@ const VALID_CONSTITUTIVE_MATURITY_LEVELS = (
     :level2_calibrated_constitutive,
     :level3_coupled_poroelastic_viscoelastic,
 )
+
+const ConstitutiveMaturityLevel = Symbol
 
 """
 Independently switchable mechanistic hypothesis flags for M3 and M4 so each
@@ -4691,12 +4698,12 @@ end
 Build the complete M6.1 `ParameterProvenanceRegistry` auditing every default
 parameter across `BiofilmMatrixComposition`, `ThinFilmSwellingMechanicsSpec`,
 `HeterogeneousDiffusivitySpec`, `ElectrokineticQSSpec`, `PolymicrobialCrosstalkSpec`,
-and `BiofilmRegulatoryParams` with exact SI dimensions, physical bounds, epistemic
-status, and literature provenance.
+and `BiofilmRegulatoryParams` (including `QSRegulatoryTopology`) with exact SI
+dimensions, physical bounds, epistemic status, and literature provenance.
 """
 function build_default_biofilm_provenance_registry()
     entries = ParameterProvenanceEntry[
-        # M3 Matrix composition
+        # 1. BiofilmMatrixComposition (5 fields)
         ParameterProvenanceEntry(
             symbol = :pga_kg_m3,
             value = 12.0,
@@ -4705,9 +4712,9 @@ function build_default_biofilm_provenance_registry()
             physical_role = :mass_concentration_kg_m3,
             uncertainty_bounds = (0.0, 150.0),
             organism_strain = :Bacillus_subtilis_NCIB3610,
-            source_status = :literature_derived,
-            source_citation = "PNAS Oct 2026: PGA drives biofilm hydration and colony swelling expansion",
-            calibrated = true
+            source_status = :assumed,
+            source_citation = "PNAS Oct 2026: PGA drives biofilm hydration and colony swelling expansion; default value requires strain-specific gravimetric/colorimetric assay calibration",
+            calibrated = false
         ),
         ParameterProvenanceEntry(
             symbol = :eps_kg_m3,
@@ -4717,9 +4724,9 @@ function build_default_biofilm_provenance_registry()
             physical_role = :mass_concentration_kg_m3,
             uncertainty_bounds = (0.0, 200.0),
             organism_strain = :Bacillus_subtilis_NCIB3610,
-            source_status = :literature_derived,
-            source_citation = "PNAS Oct 2026: EPS exopolysaccharide governs biofilm elastic modulus and wrinkling",
-            calibrated = true
+            source_status = :assumed,
+            source_citation = "PNAS Oct 2026: EPS exopolysaccharide governs biofilm elastic modulus and wrinkling; default value requires phenol-sulfuric assay calibration",
+            calibrated = false
         ),
         ParameterProvenanceEntry(
             symbol = :curli_kg_m3,
@@ -4729,9 +4736,9 @@ function build_default_biofilm_provenance_registry()
             physical_role = :mass_concentration_kg_m3,
             uncertainty_bounds = (0.0, 120.0),
             organism_strain = :Escherichia_coli_UPEC,
-            source_status = :literature_derived,
-            source_citation = "npj Biofilms and Microbiomes Oct 2026: UPEC amyloid curli nanoporous sieving",
-            calibrated = true
+            source_status = :assumed,
+            source_citation = "npj Biofilms and Microbiomes Oct 2026: UPEC amyloid curli nanoporous sieving; default value requires Thioflavin-T / Congo red calibration",
+            calibrated = false
         ),
         ParameterProvenanceEntry(
             symbol = :cellulose_kg_m3,
@@ -4757,7 +4764,20 @@ function build_default_biofilm_provenance_registry()
             source_citation = "PNAS Oct 2026 & npj Biofilms Oct 2026: hydrated biofilm interstitial volume fraction",
             calibrated = true
         ),
-        # M3 Swelling mechanics
+
+        # 2. ThinFilmSwellingMechanicsSpec (12 numeric fields + SI alias :film_thickness_m)
+        ParameterProvenanceEntry(
+            symbol = :film_thickness_um,
+            value = 45.0,
+            unit = "um (SI: 1e-6 m)",
+            si_exponents = (1, 0, 0, 0, 0, 0, 0),
+            physical_role = :length_m,
+            uncertainty_bounds = (1.0, 2000.0),
+            organism_strain = :Bacillus_subtilis_NCIB3610,
+            source_status = :measured,
+            source_citation = "PNAS Oct 2026: confocal profilometry thin-film thickness prior to buckling",
+            calibrated = true
+        ),
         ParameterProvenanceEntry(
             symbol = :film_thickness_m,
             value = 45.0e-6,
@@ -4783,6 +4803,30 @@ function build_default_biofilm_provenance_registry()
             calibrated = true
         ),
         ParameterProvenanceEntry(
+            symbol = :poisson_ratio,
+            value = 0.45,
+            unit = "1",
+            si_exponents = (0, 0, 0, 0, 0, 0, 0),
+            physical_role = :dimensionless,
+            uncertainty_bounds = (0.0, 0.499),
+            organism_strain = :Bacillus_subtilis_NCIB3610,
+            source_status = :literature_derived,
+            source_citation = "PNAS Oct 2026: hydrated swollen hydrogel thin-film Poisson ratio",
+            calibrated = true
+        ),
+        ParameterProvenanceEntry(
+            symbol = :external_osmotic_pressure_pa,
+            value = 500.0,
+            unit = "Pa",
+            si_exponents = (-1, 1, -2, 0, 0, 0, 0),
+            physical_role = :pressure_or_modulus_pa,
+            uncertainty_bounds = (0.0, 1.0e5),
+            organism_strain = :Bacillus_subtilis_NCIB3610,
+            source_status = :assumed,
+            source_citation = "Baseline external medium osmotic back-pressure; requires osmometer calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
             symbol = :pga_osmotic_coeff_pa_m3_kg,
             value = 420.0,
             unit = "Pa*m^3/kg",
@@ -4792,6 +4836,42 @@ function build_default_biofilm_provenance_registry()
             organism_strain = :Bacillus_subtilis_NCIB3610,
             source_status = :assumed,
             source_citation = "Level-1 phenomenological Donnan/Flory-Rehner linearization (PNAS Oct 2026); requires osmotic compression calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :eps_osmotic_coeff_pa_m3_kg,
+            value = 55.0,
+            unit = "Pa*m^3/kg",
+            si_exponents = (2, 0, -2, 0, 0, 0, 0),
+            physical_role = :osmotic_or_modulus_coeff_pa_m3_kg,
+            uncertainty_bounds = (0.0, 2000.0),
+            organism_strain = :Bacillus_subtilis_NCIB3610,
+            source_status = :assumed,
+            source_citation = "Level-1 phenomenological secondary EPS osmotic swelling coefficient (PNAS Oct 2026); requires osmotic compression calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :basal_gel_modulus_pa,
+            value = 400.0,
+            unit = "Pa",
+            si_exponents = (-1, 1, -2, 0, 0, 0, 0),
+            physical_role = :pressure_or_modulus_pa,
+            uncertainty_bounds = (10.0, 5.0e4),
+            organism_strain = :Bacillus_subtilis_NCIB3610,
+            source_status = :assumed,
+            source_citation = "Basal uncrosslinked matrix shear-elastic modulus; requires rheometry calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :eps_modulus_coeff_pa_m3_kg,
+            value = 110.0,
+            unit = "Pa*m^3/kg",
+            si_exponents = (2, 0, -2, 0, 0, 0, 0),
+            physical_role = :osmotic_or_modulus_coeff_pa_m3_kg,
+            uncertainty_bounds = (0.0, 5000.0),
+            organism_strain = :Bacillus_subtilis_NCIB3610,
+            source_status = :assumed,
+            source_citation = "Level-1 phenomenological EPS network modulus coefficient (PNAS Oct 2026); requires rheometry calibration",
             calibrated = false
         ),
         ParameterProvenanceEntry(
@@ -4806,7 +4886,44 @@ function build_default_biofilm_provenance_registry()
             source_citation = "Level-1 phenomenological composite fiber stiffening coefficient (PNAS Oct 2026); requires rheometry calibration",
             calibrated = false
         ),
-        # M3 Heterogeneous diffusivity
+        ParameterProvenanceEntry(
+            symbol = :cellulose_modulus_coeff_pa_m3_kg,
+            value = 340.0,
+            unit = "Pa*m^3/kg",
+            si_exponents = (2, 0, -2, 0, 0, 0, 0),
+            physical_role = :osmotic_or_modulus_coeff_pa_m3_kg,
+            uncertainty_bounds = (0.0, 8000.0),
+            organism_strain = :Escherichia_coli_UPEC,
+            source_status = :assumed,
+            source_citation = "Level-1 phenomenological cellulose fibril stiffening coefficient; requires rheometry calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :poroelastic_biot_modulus_pa,
+            value = 2500.0,
+            unit = "Pa",
+            si_exponents = (-1, 1, -2, 0, 0, 0, 0),
+            physical_role = :pressure_or_modulus_pa,
+            uncertainty_bounds = (50.0, 1.0e6),
+            organism_strain = :Bacillus_subtilis_NCIB3610,
+            source_status = :assumed,
+            source_citation = "Level-3 poroelastic Biot consolidation modulus baseline; requires micro-indentation relaxation calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :viscoelastic_relaxation_time_s,
+            value = 180.0,
+            unit = "s",
+            si_exponents = (0, 0, 1, 0, 0, 0, 0),
+            physical_role = :time_s,
+            uncertainty_bounds = (1.0, 7200.0),
+            organism_strain = :Bacillus_subtilis_NCIB3610,
+            source_status = :literature_derived,
+            source_citation = "Biofilm viscoelastic stress-relaxation timescale under creep/indentation",
+            calibrated = true
+        ),
+
+        # 3. HeterogeneousDiffusivitySpec (7 numeric fields + SI alias :reference_mesh_size_m)
         ParameterProvenanceEntry(
             symbol = :aqueous_diffusivity_m2_s,
             value = 6.5e-10,
@@ -4820,6 +4937,54 @@ function build_default_biofilm_provenance_registry()
             calibrated = true
         ),
         ParameterProvenanceEntry(
+            symbol = :probe_radius_nm,
+            value = 2.5,
+            unit = "nm (SI: 1e-9 m)",
+            si_exponents = (1, 0, 0, 0, 0, 0, 0),
+            physical_role = :length_m,
+            uncertainty_bounds = (0.1, 250.0),
+            organism_strain = :polymicrobial_consortium,
+            source_status = :measured,
+            source_citation = "Hydrodynamic radius of molecular/nanocarrier probe via DLS/FCS",
+            calibrated = true
+        ),
+        ParameterProvenanceEntry(
+            symbol = :probe_charge_valence,
+            value = 1.0,
+            unit = "1",
+            si_exponents = (0, 0, 0, 0, 0, 0, 0),
+            physical_role = :dimensionless,
+            uncertainty_bounds = (-10.0, 10.0),
+            organism_strain = :polymicrobial_consortium,
+            source_status = :measured,
+            source_citation = "Net formal/effective valence charge of diffusing solute or nanocarrier probe",
+            calibrated = true
+        ),
+        ParameterProvenanceEntry(
+            symbol = :ionic_strength_mol_l,
+            value = 0.15,
+            unit = "mol/L (SI: 1e3 mol/m^3)",
+            si_exponents = (-3, 0, 0, 0, 0, 1, 0),
+            physical_role = :ionic_strength_mol_m3,
+            uncertainty_bounds = (1.0e-4, 5.0),
+            organism_strain = :polymicrobial_consortium,
+            source_status = :measured,
+            source_citation = "Background electrolyte ionic strength governing Debye screening length",
+            calibrated = true
+        ),
+        ParameterProvenanceEntry(
+            symbol = :reference_mesh_size_nm,
+            value = 45.0,
+            unit = "nm (SI: 1e-9 m)",
+            si_exponents = (1, 0, 0, 0, 0, 0, 0),
+            physical_role = :length_m,
+            uncertainty_bounds = (1.0, 500.0),
+            organism_strain = :Escherichia_coli_UPEC,
+            source_status = :assumed,
+            source_citation = "npj Biofilms Oct 2026: UPEC biofilm correlation mesh length xi_0; requires multi-probe FRAP/FCS calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
             symbol = :reference_mesh_size_m,
             value = 45.0e-9,
             unit = "m",
@@ -4827,23 +4992,60 @@ function build_default_biofilm_provenance_registry()
             physical_role = :length_m,
             uncertainty_bounds = (1.0e-9, 500.0e-9),
             organism_strain = :Escherichia_coli_UPEC,
-            source_status = :literature_derived,
-            source_citation = "npj Biofilms Oct 2026: UPEC biofilm correlation mesh length xi_0 via multi-probe FRAP/FCS",
-            calibrated = true
+            source_status = :assumed,
+            source_citation = "npj Biofilms Oct 2026: UPEC biofilm correlation mesh length xi_0 in SI meters; requires multi-probe FRAP/FCS calibration",
+            calibrated = false
         ),
         ParameterProvenanceEntry(
             symbol = :curli_sieving_coeff,
             value = 0.085,
             unit = "m^3/kg",
             si_exponents = (3, -1, 0, 0, 0, 0, 0),
-            physical_role = :unspecified,
+            physical_role = :specific_volume_m3_kg,
             uncertainty_bounds = (0.0, 2.0),
             organism_strain = :Escherichia_coli_UPEC,
             source_status = :assumed,
             source_citation = "Phenomenological Ogston-curli sieving decay constant (npj Biofilms Oct 2026); requires multi-radius probe calibration",
             calibrated = false
         ),
-        # M4 Electrokinetic & polymicrobial QS
+        ParameterProvenanceEntry(
+            symbol = :charge_binding_coeff,
+            value = 0.045,
+            unit = "m^3/kg",
+            si_exponents = (3, -1, 0, 0, 0, 0, 0),
+            physical_role = :specific_volume_m3_kg,
+            uncertainty_bounds = (0.0, 2.0),
+            organism_strain = :Escherichia_coli_UPEC,
+            source_status = :assumed,
+            source_citation = "Phenomenological electrostatic Donnan/binding partition coefficient; requires cationic/anionic probe calibration",
+            calibrated = false
+        ),
+
+        # 4. ElectrokineticQSSpec (6 numeric fields)
+        ParameterProvenanceEntry(
+            symbol = :electric_field_v_m,
+            value = 1500.0,
+            unit = "V/m",
+            si_exponents = (1, 1, -3, -1, 0, 0, 0),
+            physical_role = :electric_field_V_m,
+            uncertainty_bounds = (0.0, 5.0e4),
+            organism_strain = :polymicrobial_consortium,
+            source_status = :measured,
+            source_citation = "Oct 17, 2026 electrokinetic AHL disruption study: applied microfluidic electric field intensity",
+            calibrated = true
+        ),
+        ParameterProvenanceEntry(
+            symbol = :ros_generation_factor,
+            value = 1.0,
+            unit = "1",
+            si_exponents = (0, 0, 0, 0, 0, 0, 0),
+            physical_role = :dimensionless,
+            uncertainty_bounds = (0.0, 10.0),
+            organism_strain = :polymicrobial_consortium,
+            source_status = :assumed,
+            source_citation = "Relative anodic ROS yield scaling factor; requires amperometric/spin-trap calibration",
+            calibrated = false
+        ),
         ParameterProvenanceEntry(
             symbol = :k_electric_ros_s,
             value = 0.018,
@@ -4857,6 +5059,80 @@ function build_default_biofilm_provenance_registry()
             calibrated = true
         ),
         ParameterProvenanceEntry(
+            symbol = :k_enzymatic_qq_s,
+            value = 0.004,
+            unit = "1/s",
+            si_exponents = (0, 0, -1, 0, 0, 0, 0),
+            physical_role = :first_order_rate_s,
+            uncertainty_bounds = (0.0, 0.5),
+            organism_strain = :polymicrobial_consortium,
+            source_status = :literature_derived,
+            source_citation = "Oct 17, 2026 electrokinetic AHL study: biological lactonase/acylase quorum-quenching rate",
+            calibrated = true
+        ),
+        ParameterProvenanceEntry(
+            symbol = :matrix_shielding_coeff,
+            value = 0.065,
+            unit = "m^3/kg",
+            si_exponents = (3, -1, 0, 0, 0, 0, 0),
+            physical_role = :specific_volume_m3_kg,
+            uncertainty_bounds = (0.0, 2.0),
+            organism_strain = :polymicrobial_consortium,
+            source_status = :assumed,
+            source_citation = "0D matrix scavenging attenuation coefficient; superseded by 1D reaction-diffusion Thiele audit when Phi > 1",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :direct_electrochemical_fraction,
+            value = 0.30,
+            unit = "1",
+            si_exponents = (0, 0, 0, 0, 0, 0, 0),
+            physical_role = :dimensionless,
+            uncertainty_bounds = (0.0, 1.0),
+            organism_strain = :polymicrobial_consortium,
+            source_status = :assumed,
+            source_citation = "Fraction of abiotic AHL clearance from direct anodic oxidation vs ROS-mediated radical attack",
+            calibrated = false
+        ),
+
+        # 5. PolymicrobialCrosstalkSpec (4 numeric fields + SI alias :alkaline_lactonolysis_coeff_s)
+        ParameterProvenanceEntry(
+            symbol = :direct_receptor_competition_coeff,
+            value = 0.35,
+            unit = "1",
+            si_exponents = (0, 0, 0, 0, 0, 0, 0),
+            physical_role = :dimensionless,
+            uncertainty_bounds = (0.0, 10.0),
+            organism_strain = :polymicrobial_consortium,
+            source_status = :assumed,
+            source_citation = "Critical Reviews in Microbiology Oct 2026 Mode 1: non-cognate autoinducer competitive inhibition constant",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :chemical_effector_inhibition_coeff,
+            value = 0.45,
+            unit = "1/uM (SI: 1e3 m^3/mol)",
+            si_exponents = (3, 0, 0, 0, 0, -1, 0),
+            physical_role = :inverse_molar_concentration_m3_mol,
+            uncertainty_bounds = (0.0, 50.0),
+            organism_strain = :polymicrobial_consortium,
+            source_status = :assumed,
+            source_citation = "Critical Reviews in Microbiology Oct 2026 Mode 2: HQNO/pyocyanin chemical-effector inhibition constant",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :alkaline_lactonolysis_coeff,
+            value = 0.28,
+            unit = "1/h (SI: 1/3600 1/s)",
+            si_exponents = (0, 0, -1, 0, 0, 0, 0),
+            physical_role = :first_order_rate_s,
+            uncertainty_bounds = (0.0, 360.0),
+            organism_strain = :polymicrobial_consortium,
+            source_status = :literature_derived,
+            source_citation = "Critical Reviews in Microbiology Oct 2026 Mode 3: pH-dependent AHL lactone ring opening rate per hour above pH 7.5",
+            calibrated = true
+        ),
+        ParameterProvenanceEntry(
             symbol = :alkaline_lactonolysis_coeff_s,
             value = 0.28 / 3600.0,
             unit = "1/s",
@@ -4865,10 +5141,83 @@ function build_default_biofilm_provenance_registry()
             uncertainty_bounds = (0.0, 0.1),
             organism_strain = :polymicrobial_consortium,
             source_status = :literature_derived,
-            source_citation = "Critical Reviews in Microbiology Oct 2026: pH-dependent AHL lactone ring opening above pH 7.5",
+            source_citation = "Critical Reviews in Microbiology Oct 2026: pH-dependent AHL lactone ring opening above pH 7.5 in SI 1/s",
             calibrated = true
         ),
-        # M4 Regulatory & Droop quota
+        ParameterProvenanceEntry(
+            symbol = :redox_modulation_coeff,
+            value = 0.15,
+            unit = "1",
+            si_exponents = (0, 0, 0, 0, 0, 0, 0),
+            physical_role = :dimensionless,
+            uncertainty_bounds = (0.0, 1.0),
+            organism_strain = :polymicrobial_consortium,
+            source_status = :assumed,
+            source_citation = "Critical Reviews in Microbiology Oct 2026 Mode 3: local Eh redox sensitivity coefficient",
+            calibrated = false
+        ),
+
+        # 6. BiofilmRegulatoryParams + QSRegulatoryTopology (16 numeric fields + SI alias :ev_psm_induced_release_per_m3_s)
+        ParameterProvenanceEntry(
+            symbol = :activation_threshold_um,
+            value = 0.45,
+            unit = "uM (SI: 1e-3 mol/m^3)",
+            si_exponents = (-3, 0, 0, 0, 0, 1, 0),
+            physical_role = :molar_concentration_mol_m3,
+            uncertainty_bounds = (1.0e-3, 100.0),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :literature_derived,
+            source_citation = "mBio Oct 2026: AgrC-AgrA autoinducer half-activation threshold K_d",
+            calibrated = true
+        ),
+        ParameterProvenanceEntry(
+            symbol = :hill_coefficient,
+            value = 2.2,
+            unit = "1",
+            si_exponents = (0, 0, 0, 0, 0, 0, 0),
+            physical_role = :dimensionless,
+            uncertainty_bounds = (1.0, 6.0),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :literature_derived,
+            source_citation = "mBio Oct 2026: positive-feedback cooperativity Hill exponent of agr P2/P3 circuit",
+            calibrated = true
+        ),
+        ParameterProvenanceEntry(
+            symbol = :pqse_chaperone_coupling,
+            value = 0.0,
+            unit = "1",
+            si_exponents = (0, 0, 0, 0, 0, 0, 0),
+            physical_role = :dimensionless,
+            uncertainty_bounds = (0.0, 2.0),
+            organism_strain = :Pseudomonas_aeruginosa_PAO1,
+            source_status = :literature_derived,
+            source_citation = "P. aeruginosa PqsE-RhlR allosteric chaperone coupling (0.0 in S. aureus monoculture)",
+            calibrated = true
+        ),
+        ParameterProvenanceEntry(
+            symbol = :nutrient_uptake_rate_mm_h,
+            value = 0.38,
+            unit = "mM/h (SI: 1/3600 mol/(m^3*s))",
+            si_exponents = (-3, 0, -1, 0, 0, 1, 0),
+            physical_role = :volumetric_reaction_rate_mol_m3_s,
+            uncertainty_bounds = (0.0, 20.0),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :assumed,
+            source_citation = "Maximum volumetric Monod substrate uptake rate; requires chemostat/microfluidic effluent calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :nutrient_half_sat_mm,
+            value = 0.80,
+            unit = "mM (SI: mol/m^3)",
+            si_exponents = (-3, 0, 0, 0, 0, 1, 0),
+            physical_role = :molar_concentration_mol_m3,
+            uncertainty_bounds = (0.01, 50.0),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :literature_derived,
+            source_citation = "Monod half-saturation constant K_s for limiting carbon/nitrogen substrate",
+            calibrated = true
+        ),
         ParameterProvenanceEntry(
             symbol = :min_droop_quota,
             value = 0.22,
@@ -4882,6 +5231,90 @@ function build_default_biofilm_provenance_registry()
             calibrated = true
         ),
         ParameterProvenanceEntry(
+            symbol = :quota_replenish_rate_h,
+            value = 0.45,
+            unit = "1/h (SI: 1/3600 1/s)",
+            si_exponents = (0, 0, -1, 0, 0, 0, 0),
+            physical_role = :first_order_rate_s,
+            uncertainty_bounds = (0.0, 10.0),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :assumed,
+            source_citation = "Intracellular nutrient quota replenishment rate constant; requires isotopic/chemostat calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :quota_consumption_rate_h,
+            value = 0.25,
+            unit = "1/h (SI: 1/3600 1/s)",
+            si_exponents = (0, 0, -1, 0, 0, 0, 0),
+            physical_role = :first_order_rate_s,
+            uncertainty_bounds = (0.0, 10.0),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :assumed,
+            source_citation = "Intracellular quota growth-dilution rate constant; requires chemostat dilution calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :ai_basal_synth_um_h,
+            value = 0.04,
+            unit = "uM/h (SI: 1e-3/3600 mol/(m^3*s))",
+            si_exponents = (-3, 0, -1, 0, 0, 1, 0),
+            physical_role = :volumetric_reaction_rate_mol_m3_s,
+            uncertainty_bounds = (0.0, 5.0),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :assumed,
+            source_citation = "Basal uninduced autoinducer production rate; requires LC-MS/reporter calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :ai_induced_synth_um_h,
+            value = 0.55,
+            unit = "uM/h (SI: 1e-3/3600 mol/(m^3*s))",
+            si_exponents = (-3, 0, -1, 0, 0, 1, 0),
+            physical_role = :volumetric_reaction_rate_mol_m3_s,
+            uncertainty_bounds = (0.0, 20.0),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :assumed,
+            source_citation = "Quorum-activated autoinducer synthesis rate; requires LC-MS/reporter calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :ai_natural_decay_h,
+            value = 0.18,
+            unit = "1/h (SI: 1/3600 1/s)",
+            si_exponents = (0, 0, -1, 0, 0, 0, 0),
+            physical_role = :first_order_rate_s,
+            uncertainty_bounds = (0.0, 5.0),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :literature_derived,
+            source_citation = "Spontaneous neutral-pH autoinducer turnover rate",
+            calibrated = true
+        ),
+        ParameterProvenanceEntry(
+            symbol = :ev_basal_release_per_ml_h,
+            value = 2.5e5,
+            unit = "1/(mL*h) (SI: 1e6/3600 1/(m^3*s))",
+            si_exponents = (-3, 0, -1, 0, 0, 0, 0),
+            physical_role = :number_rate_density_per_m3_s,
+            uncertainty_bounds = (0.0, 1.0e10),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :assumed,
+            source_citation = "mBio Oct 2026: basal PSM-independent S. aureus extracellular vesicle shedding rate; requires NTA calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :ev_psm_induced_release_per_ml_h,
+            value = 4.8e6,
+            unit = "1/(mL*h) (SI: 1e6/3600 1/(m^3*s))",
+            si_exponents = (-3, 0, -1, 0, 0, 0, 0),
+            physical_role = :number_rate_density_per_m3_s,
+            uncertainty_bounds = (0.0, 1.0e11),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :assumed,
+            source_citation = "mBio Oct 2026: alpha-PSM-driven S. aureus extracellular vesicle release rate per mL*h; requires NTA/FCM bead calibration",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
             symbol = :ev_psm_induced_release_per_m3_s,
             value = 4.8e6 * 1.0e6 / 3600.0,
             unit = "1/(m^3*s)",
@@ -4890,8 +5323,44 @@ function build_default_biofilm_provenance_registry()
             uncertainty_bounds = (0.0, 1.0e14),
             organism_strain = :Staphylococcus_aureus_USA300,
             source_status = :assumed,
-            source_citation = "mBio Oct 2026: alpha-PSM-driven S. aureus extracellular vesicle release rate; requires NTA/FCM bead calibration",
+            source_citation = "mBio Oct 2026: alpha-PSM-driven S. aureus extracellular vesicle release rate in SI 1/(m^3*s); requires NTA/FCM bead calibration",
             calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :oxidative_stress_index,
+            value = 0.25,
+            unit = "1",
+            si_exponents = (0, 0, 0, 0, 0, 0, 0),
+            physical_role = :dimensionless,
+            uncertainty_bounds = (0.0, 5.0),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :assumed,
+            source_citation = "mBio Oct 2026: normalized intracellular ROS stress index decoupling RNAIII from alpha-PSM",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :fructose_flux_index,
+            value = 0.60,
+            unit = "1",
+            si_exponents = (0, 0, 0, 0, 0, 0, 0),
+            physical_role = :dimensionless,
+            uncertainty_bounds = (0.0, 5.0),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :assumed,
+            source_citation = "ISME J Oct 2026: normalized fruA/fruK PTS fructose uptake flux index",
+            calibrated = false
+        ),
+        ParameterProvenanceEntry(
+            symbol = :vancomycin_exposure_ug_ml,
+            value = 0.0,
+            unit = "ug/mL (SI: 1e-3 kg/m^3)",
+            si_exponents = (-3, 1, 0, 0, 0, 0, 0),
+            physical_role = :mass_concentration_kg_m3,
+            uncertainty_bounds = (0.0, 200.0),
+            organism_strain = :Staphylococcus_aureus_USA300,
+            source_status = :measured,
+            source_citation = "ISME J Oct 2026: extracellular glycopeptide antibiotic exposure concentration",
+            calibrated = true
         ),
     ]
     return ParameterProvenanceRegistry("M6-DEFAULT-BIOFILM-PROVENANCE-01", entries)
@@ -4907,6 +5376,12 @@ struct RegulatoryInteractionEdge
     sign::Symbol
     species_scope::Symbol
     strain_scope::String
+    signal_producer::Symbol
+    signal_molecule::String
+    receiving_species::Symbol
+    receptor_target::String
+    environmental_conditions::String
+    parameter_uncertainty::Tuple{Float64,Float64}
     mechanism_class::Symbol
     evidence_status::Symbol
     citation::String
@@ -4917,6 +5392,12 @@ struct RegulatoryInteractionEdge
             sign::Symbol=:activation,
             species_scope::Symbol=:staphylococcus_aureus,
             strain_scope::AbstractString="USA300",
+            signal_producer::Union{Nothing,Symbol}=nothing,
+            signal_molecule::Union{Nothing,AbstractString}=nothing,
+            receiving_species::Union{Nothing,Symbol}=nothing,
+            receptor_target::Union{Nothing,AbstractString}=nothing,
+            environmental_conditions::AbstractString="37C_pH7.2_microaerobic",
+            parameter_uncertainty::Tuple{<:Real,<:Real}=(0.10, 1.00),
             mechanism_class::Symbol=:transcriptional,
             evidence_status::Symbol=:calibrated,
             citation::AbstractString="")
@@ -4924,8 +5405,8 @@ struct RegulatoryInteractionEdge
         tgt = String(strip(target_node))
         !isempty(src) && !isempty(tgt) ||
             throw(ArgumentError("source_node and target_node must be non-empty"))
-        sign in (:activation, :repression, :catalysis, :degradation) ||
-            throw(ArgumentError("sign must be :activation, :repression, :catalysis, or :degradation"))
+        sign in (:activation, :inhibition, :repression, :catalysis, :degradation) ||
+            throw(ArgumentError("sign must be :activation, :inhibition, :repression, :catalysis, or :degradation"))
         species_scope in (:staphylococcus_aureus, :pseudomonas_aeruginosa, :polymicrobial_shared, :abiotic_environment) ||
             throw(ArgumentError("invalid species_scope :$species_scope"))
         mechanism_class in (:transcriptional, :post_transcriptional, :chaperone_allosteric,
@@ -4937,7 +5418,22 @@ struct RegulatoryInteractionEdge
         if evidence_status in (:observed, :calibrated) && isempty(cit)
             throw(ArgumentError("citation must be non-empty for :observed or :calibrated regulatory edges"))
         end
-        new(src, tgt, sign, species_scope, String(strip(strain_scope)), mechanism_class, evidence_status, cit)
+        prod_sp = signal_producer === nothing ? species_scope : signal_producer
+        sig_mol = signal_molecule === nothing ? src : String(strip(signal_molecule))
+        recv_sp = receiving_species === nothing ? species_scope : receiving_species
+        rec_tgt = receptor_target === nothing ? tgt : String(strip(receptor_target))
+        env_cond = String(strip(environmental_conditions))
+        !isempty(sig_mol) && !isempty(rec_tgt) && !isempty(env_cond) ||
+            throw(ArgumentError("signal_molecule, receptor_target, and environmental_conditions must be non-empty"))
+        u_lo = Float64(parameter_uncertainty[1])
+        u_hi = Float64(parameter_uncertainty[2])
+        isfinite(u_lo) && isfinite(u_hi) && u_lo <= u_hi ||
+            throw(ArgumentError("parameter_uncertainty must satisfy lower <= upper"))
+        new(
+            src, tgt, sign, species_scope, String(strip(strain_scope)),
+            prod_sp, sig_mol, recv_sp, rec_tgt, env_cond, (u_lo, u_hi),
+            mechanism_class, evidence_status, cit
+        )
     end
 end
 
@@ -4990,36 +5486,54 @@ function build_species_regulatory_network(
             RegulatoryInteractionEdge(
                 source_node="Extracellular_Nutrient_N", target_node="Intracellular_Quota_Q",
                 sign=:activation, species_scope=:staphylococcus_aureus, strain_scope="USA300",
+                signal_producer=:abiotic_environment, signal_molecule="Glucose_Fructose_Substrate",
+                receiving_species=:staphylococcus_aureus, receptor_target="PTS_Permease_Quota_Pool",
+                environmental_conditions="37C_pH7.2_nutrient_limited", parameter_uncertainty=(0.20, 0.80),
                 mechanism_class=:metabolic_quota, evidence_status=:calibrated,
                 citation="Droop (1973) & mBio Oct 2026: intracellular quota replenishment"
             ),
             RegulatoryInteractionEdge(
                 source_node="AIP_I", target_node="AgrC_AgrA",
                 sign=:activation, species_scope=:staphylococcus_aureus, strain_scope="USA300",
+                signal_producer=:staphylococcus_aureus, signal_molecule="AIP-I_thiolactone",
+                receiving_species=:staphylococcus_aureus, receptor_target="AgrC_histidine_kinase",
+                environmental_conditions="37C_pH7.0_neutral_biofilm", parameter_uncertainty=(0.15, 0.75),
                 mechanism_class=:transcriptional, evidence_status=:observed,
                 citation="mBio Oct 2026: S. aureus agr two-component autoinducer sensing"
             ),
             RegulatoryInteractionEdge(
                 source_node="AgrC_AgrA", target_node="RNAIII",
                 sign=:activation, species_scope=:staphylococcus_aureus, strain_scope="USA300",
+                signal_producer=:staphylococcus_aureus, signal_molecule="Phospho_AgrA",
+                receiving_species=:staphylococcus_aureus, receptor_target="P3_RNAIII_promoter",
+                environmental_conditions="37C_pH7.0_low_ROS", parameter_uncertainty=(0.50, 1.00),
                 mechanism_class=:transcriptional, evidence_status=:observed,
                 citation="mBio Oct 2026: AgrA P3 promoter activation of RNAIII"
             ),
             RegulatoryInteractionEdge(
                 source_node="AgrC_AgrA", target_node="alpha_PSM",
                 sign=:activation, species_scope=:staphylococcus_aureus, strain_scope="USA300",
+                signal_producer=:staphylococcus_aureus, signal_molecule="Phospho_AgrA",
+                receiving_species=:staphylococcus_aureus, receptor_target="psm_alpha_operon_promoter",
+                environmental_conditions="37C_nutrient_and_oxidative_stress", parameter_uncertainty=(0.40, 1.00),
                 mechanism_class=:transcriptional, evidence_status=:observed,
                 citation="mBio Oct 2026: direct AgrA activation of psm-alpha independent of RNAIII under stress"
             ),
             RegulatoryInteractionEdge(
                 source_node="alpha_PSM", target_node="EV_Biogenesis",
                 sign=:catalysis, species_scope=:staphylococcus_aureus, strain_scope="USA300",
+                signal_producer=:staphylococcus_aureus, signal_molecule="alpha_PSM_amphipathic_peptide",
+                receiving_species=:staphylococcus_aureus, receptor_target="Cytoplasmic_Membrane_Lipid_Packing",
+                environmental_conditions="37C_peptidoglycan_crosslinking_reduced", parameter_uncertainty=(1.0e6, 1.0e7),
                 mechanism_class=:post_transcriptional, evidence_status=:observed,
                 citation="mBio Oct 2026: alpha-PSM surfactant membrane turgor release of S. aureus EVs"
             ),
             RegulatoryInteractionEdge(
                 source_node="FruA_FruK_Fructose_Flux", target_node="Vancomycin_Tolerant_Subpop",
                 sign=:activation, species_scope=:staphylococcus_aureus, strain_scope="USA300",
+                signal_producer=:staphylococcus_aureus, signal_molecule="Fructose_1_Phosphate",
+                receiving_species=:staphylococcus_aureus, receptor_target="Cell_Wall_Peptidoglycan_Precursor_Pathway",
+                environmental_conditions="37C_biofilm_fructose_niche_vancomycin_exposure", parameter_uncertainty=(0.15, 0.65),
                 mechanism_class=:metabolic_quota, evidence_status=:observed,
                 citation="ISME J Oct 2026: clonal S. aureus fruA/fruK fructose uptake drives cell-wall thickening and vancomycin tolerance"
             ),
@@ -5041,24 +5555,36 @@ function build_species_regulatory_network(
             RegulatoryInteractionEdge(
                 source_node="3OC12_HSL", target_node="LasI_LasR",
                 sign=:activation, species_scope=:pseudomonas_aeruginosa, strain_scope="PAO1/PA14",
+                signal_producer=:pseudomonas_aeruginosa, signal_molecule="3OC12-HSL",
+                receiving_species=:pseudomonas_aeruginosa, receptor_target="LasR_transcriptional_regulator",
+                environmental_conditions="37C_pH6.8_to_7.4", parameter_uncertainty=(0.10, 0.90),
                 mechanism_class=:transcriptional, evidence_status=:observed,
                 citation="Critical Reviews in Microbiology Oct 2026: canonical LasI/LasR acyl-HSL circuit"
             ),
             RegulatoryInteractionEdge(
                 source_node="PqsE_Chaperone", target_node="RhlR_Regulon",
                 sign=:activation, species_scope=:pseudomonas_aeruginosa, strain_scope="PA14",
+                signal_producer=:pseudomonas_aeruginosa, signal_molecule="PqsE_protein_chaperone",
+                receiving_species=:pseudomonas_aeruginosa, receptor_target="RhlR_dimer_complex",
+                environmental_conditions="37C_biofilm_high_density", parameter_uncertainty=(0.25, 1.50),
                 mechanism_class=:chaperone_allosteric, evidence_status=:observed,
                 citation="P. aeruginosa PqsE-RhlR physical complex allosteric activation"
             ),
             RegulatoryInteractionEdge(
                 source_node="C4_HSL", target_node="RhlR_Regulon",
                 sign=:activation, species_scope=:pseudomonas_aeruginosa, strain_scope="PAO1/PA14",
+                signal_producer=:pseudomonas_aeruginosa, signal_molecule="C4-HSL",
+                receiving_species=:pseudomonas_aeruginosa, receptor_target="RhlR_ligand_pocket",
+                environmental_conditions="37C_pH6.8_to_7.4", parameter_uncertainty=(0.20, 1.20),
                 mechanism_class=:transcriptional, evidence_status=:observed,
                 citation="P. aeruginosa C4-HSL activation of RhlR"
             ),
             RegulatoryInteractionEdge(
                 source_node="RhlR_Regulon", target_node="Pyocyanin_HQNO_Effector",
                 sign=:activation, species_scope=:pseudomonas_aeruginosa, strain_scope="PAO1/PA14",
+                signal_producer=:pseudomonas_aeruginosa, signal_molecule="RhlR_PqsE_Active_Complex",
+                receiving_species=:pseudomonas_aeruginosa, receptor_target="phzA1_pqsABCD_operons",
+                environmental_conditions="37C_microaerobic_biofilm", parameter_uncertainty=(0.15, 0.85),
                 mechanism_class=:transcriptional, evidence_status=:observed,
                 citation="Critical Reviews in Microbiology Oct 2026: RhlR/PQS control of HQNO and phenazine synthesis"
             ),
@@ -5078,13 +5604,19 @@ function build_species_regulatory_network(
         cross_edges = [
             RegulatoryInteractionEdge(
                 source_node="Pyocyanin_HQNO_Effector", target_node="AgrC_AgrA",
-                sign=:repression, species_scope=:polymicrobial_shared, strain_scope="PA14_to_USA300",
+                sign=:inhibition, species_scope=:polymicrobial_shared, strain_scope="PA14_to_USA300",
+                signal_producer=:pseudomonas_aeruginosa, signal_molecule="HQNO_and_Pyocyanin",
+                receiving_species=:staphylococcus_aureus, receptor_target="AgrC_Membrane_Respiratory_Chain",
+                environmental_conditions="37C_polymicrobial_wound_or_flowcell", parameter_uncertainty=(0.20, 0.80),
                 mechanism_class=:chemical_effector, evidence_status=:observed,
                 citation="Critical Reviews in Microbiology Oct 2026: Mode 2 chemical-effector inhibition of S. aureus agr by P. aeruginosa HQNO/pyocyanin"
             ),
             RegulatoryInteractionEdge(
                 source_node="Alkaline_pH_Lactonolysis", target_node="3OC12_HSL",
                 sign=:degradation, species_scope=:abiotic_environment, strain_scope="microenvironment",
+                signal_producer=:abiotic_environment, signal_molecule="Hydroxide_Ion_pH_gt_7.5",
+                receiving_species=:pseudomonas_aeruginosa, receptor_target="3OC12_HSL_Homoserine_Lactone_Ring",
+                environmental_conditions="pH_gt_7.5_alkaline_microenvironment", parameter_uncertainty=(0.10, 0.55),
                 mechanism_class=:quorum_quenching, evidence_status=:observed,
                 citation="Critical Reviews in Microbiology Oct 2026: Mode 3 alkaline pH AHL lactonolysis above pH 7.5"
             ),
@@ -5588,7 +6120,7 @@ export ENGINE_VERSION, FCSIO, CytometryAnalysis, CellClassifier, MicrofluidicBri
        solve_emulsion_interfacial_droplet,
        # Re-exports from BiofilmMultiphysics (M3, M4, M6)
        VALID_QS_TOPOLOGIES, VALID_MORPHOLOGICAL_PHASES,
-       VALID_CONSTITUTIVE_MATURITY_LEVELS,
+       VALID_CONSTITUTIVE_MATURITY_LEVELS, ConstitutiveMaturityLevel,
        BiofilmHypothesisSwitches,
        BiofilmMatrixComposition, total_matrix_biopolymer_kg_m3,
        ThinFilmSwellingMechanicsSpec, evaluate_biofilm_swelling_mechanics,

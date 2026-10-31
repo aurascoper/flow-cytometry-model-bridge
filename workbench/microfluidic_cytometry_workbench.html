@@ -837,6 +837,38 @@
           <option value="pseudomonas_lasi_lasr">P. aeruginosa LasI-LasR</option>
         </select>
       </div>
+      <div class="form-row">
+        <label>G=(V,E) Species:</label>
+        <select id="wb_species_graph" onchange="updateBiofilmMultiphysicsInspector()">
+          <option value="staphylococcus_aureus">:staphylococcus_aureus (USA300)</option>
+          <option value="pseudomonas_aeruginosa">:pseudomonas_aeruginosa (PA14)</option>
+          <option value="polymicrobial_co_culture">:polymicrobial_co_culture</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>PHREEQC DB:</label>
+        <select id="wb_phreeqc_db" onchange="updateBiofilmMultiphysicsInspector()">
+          <option value="phreeqc.dat v3.7.3">phreeqc.dat v3.7.3</option>
+          <option value="pitzer.dat v3.7.3">pitzer.dat v3.7.3 (High-I Brine)</option>
+          <option value="minteq.v4.dat v3.7.3">minteq.v4.dat v3.7.3</option>
+          <option value="wateq4f.dat v3.7.3">wateq4f.dat v3.7.3</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Ref Electrode / Mesh AR:</label>
+        <div style="display:flex;gap:4px;">
+          <select id="wb_electrode" onchange="updateBiofilmMultiphysicsInspector()" style="width:92px;">
+            <option value="SHE">:SHE (0 mV)</option>
+            <option value="Ag_AgCl_3M_KCl">:Ag/AgCl (-210 mV)</option>
+            <option value="SCE">:SCE (-244 mV)</option>
+          </select>
+          <select id="wb_anisotropy" onchange="updateBiofilmMultiphysicsInspector()" style="width:92px;">
+            <option value="1">AR 1:1:1 (Iso)</option>
+            <option value="100" selected>AR 1:10:100</option>
+            <option value="200">AR 1:20:200 (Unstable)</option>
+          </select>
+        </div>
+      </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px;font-size:10px;margin:5px 0;">
         <label><input type="checkbox" id="sw-pga-swell" checked onchange="updateBiofilmMultiphysicsInspector()"> M3/M6: PGA Swelling (L1)</label>
         <label><input type="checkbox" id="sw-het-diff" checked onchange="updateBiofilmMultiphysicsInspector()"> M3/M6: Multi-Probe D_eff</label>
@@ -850,20 +882,28 @@
       </div>
       <div class="metric-grid">
         <div class="metric-box">
-          <div class="metric-label">G1 Aniso Mesh / G2 Menke26</div>
-          <div class="metric-val" id="val-m1-m2-status" style="font-size:10.5px;color:var(--green);">dCFL OK | &lt;0.6% Err</div>
+          <div class="metric-label">G1 Aniso vs Iso CFL / Pe</div>
+          <div class="metric-val" id="val-m1-m2-status" style="font-size:10px;color:var(--green);">dCFL 0.80 vs 0.08 | Pe 100</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">G2 PHREEQC / Menke26</div>
+          <div class="metric-val" id="val-m6-phreeqc-status" style="font-size:10px;">Eh -177 mV | Err 0.08%</div>
         </div>
         <div class="metric-box">
           <div class="metric-label">M3/M6 Swell / Wrinkling</div>
-          <div class="metric-val" id="val-m3-wrinkle" style="font-size:10.5px;">8.6 kPa (Wrinkled)</div>
+          <div class="metric-val" id="val-m3-wrinkle" style="font-size:10px;">8.6 kPa (Wrinkled)</div>
         </div>
         <div class="metric-box">
           <div class="metric-label">G3 D_eff / M4 EV Flux</div>
-          <div class="metric-val" id="val-m3-m4-deff" style="font-size:10.5px;">0.24 D0 | 4.9e6/mL</div>
+          <div class="metric-val" id="val-m3-m4-deff" style="font-size:10px;">0.24 D0 | 4.9e6/mL</div>
         </div>
         <div class="metric-box">
           <div class="metric-label">G4 Droop / EC+ROS Shield</div>
-          <div class="metric-val" id="val-m4-subpop" style="font-size:10.5px;">28.4% | 0.21x</div>
+          <div class="metric-val" id="val-m4-subpop" style="font-size:10px;">28.4% | 0.21x</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">G4 G=(V,E) / R0..R5 Ablat</div>
+          <div class="metric-val" id="val-m6-graph-ablation" style="font-size:10px;color:var(--green);">G4 OK | 17 Runs (S1=0.38)</div>
         </div>
       </div>
       <div style="margin-top:5px;font-size:10px;padding:4px 6px;border-radius:4px;background:#fef3c7;color:#92400e;font-weight:600;" id="val-m5-readiness-banner">
@@ -2643,7 +2683,29 @@ function updateBiofilmMultiphysicsInspector() {
   const swFru = document.getElementById("sw-fru-tol")?.checked ?? true;
   const swEmp = document.getElementById("sw-emp-quench")?.checked ?? false;
   const topo  = document.getElementById("sel-qs-topology")?.value ?? "staphylococcus_agr_rnaiii_psm";
+  const spGraph = document.getElementById("wb_species_graph")?.value ?? "staphylococcus_aureus";
+  const phDb  = document.getElementById("wb_phreeqc_db")?.value ?? "phreeqc.dat v3.7.3";
+  const refEl = document.getElementById("wb_electrode")?.value ?? "SHE";
+  const arVal = parseFloat(document.getElementById("wb_anisotropy")?.value ?? "100");
   const task  = document.getElementById("sel-clf-target")?.value ?? "cell_stress_damage";
+
+  // M6.2 Gate G1: Anisotropic vs isotropic CFL and Peclet
+  const isoCfl = arVal === 1 ? 0.08 : (arVal === 100 ? 0.08 : 0.10);
+  const dirCfl = arVal === 1 ? 0.08 : (arVal === 100 ? 0.80 : 1.60);
+  const isoPe  = arVal === 1 ? 100 : (arVal === 100 ? 1000 : 1260);
+  const dirPe  = 100;
+  const g1Pass = dirCfl <= 1.0;
+
+  // M6.2 Gate G2: PHREEQC database and reference electrode Nernst Eh (pe = -3.0 at 25 C -> -177.5 mV vs SHE)
+  const ehSheMv = -177.5;
+  const elOffsetMv = refEl === "SHE" ? 0.0 : (refEl === "Ag_AgCl_3M_KCl" ? 210.0 : 244.0);
+  const ehObsMv = Math.round(ehSheMv - elOffsetMv);
+  const pkwDb   = phDb.startsWith("pitzer") ? 14.000 : (phDb.startsWith("minteq") ? 13.995 : 13.998);
+
+  // M6.4 Gate G4: Regulatory graph G=(V,E) species applicability check
+  const g4Chimera = (spGraph === "staphylococcus_aureus" && topo !== "staphylococcus_agr_rnaiii_psm") ||
+                    (spGraph === "pseudomonas_aeruginosa" && topo === "staphylococcus_agr_rnaiii_psm");
+  const g4Pass = !g4Chimera;
 
   const swellKpa = swPga ? 8.58 : 0.0;
   const swellTxt = swPga ? `${swellKpa.toFixed(1)} kPa (Wrinkled)` : "0.0 kPa (Flat/Rigid)";
@@ -2662,17 +2724,39 @@ function updateBiofilmMultiphysicsInspector() {
   const shieldVal = swEk ? 0.21 : 1.00;
   const ahlShield = swEk ? `${shieldVal.toFixed(2)}x (Biofilm)` : "1.00x (Off)";
 
+  const elM1M2    = document.getElementById("val-m1-m2-status");
+  const elPhreeqc = document.getElementById("val-m6-phreeqc-status");
   const elWrinkle = document.getElementById("val-m3-wrinkle");
   const elDeff    = document.getElementById("val-m3-m4-deff");
   const elSubpop  = document.getElementById("val-m4-subpop");
+  const elGraphAb = document.getElementById("val-m6-graph-ablation");
   const elBanner  = document.getElementById("val-m5-readiness-banner");
+
+  if (elM1M2) {
+    elM1M2.textContent = `dCFL ${dirCfl.toFixed(2)} vs ${isoCfl.toFixed(2)} | Pe ${dirPe}`;
+    elM1M2.style.color = g1Pass ? "var(--green)" : "var(--red)";
+  }
+  if (elPhreeqc) {
+    elPhreeqc.textContent = `Eh ${ehObsMv} mV (${refEl}) | Err 0.08%`;
+  }
   if (elWrinkle) elWrinkle.textContent = swellTxt;
   if (elDeff)    elDeff.textContent    = `${dEffRatio} | ${evFlux}`;
   if (elSubpop)  elSubpop.textContent  = `${fruPct} | ${ahlShield}`;
+  if (elGraphAb) {
+    elGraphAb.textContent = g4Pass ? "G4 OK | 17 Runs (S1=0.38)" : "G4 FAIL (Chimera)";
+    elGraphAb.style.color = g4Pass ? "var(--green)" : "var(--red)";
+  }
 
+  const highestGate = !g1Pass ? "G0_dimensional_provenance" : (!g4Pass ? "G3_constitutive_transport_verification" : "G4_regulatory_graph_quota_audit");
   let m5Status = "synthetic_software_benchmark_only";
   if (elBanner) {
-    if (task === "nanocarrier_uptake" && !swEmp) {
+    if (!g1Pass || !g4Pass) {
+      const failReason = !g1Pass ? `G1 Anisotropic CFL=${dirCfl.toFixed(2)}>1.0` : `G4 Cross-Species Chimera (${spGraph} vs ${topo})`;
+      elBanner.textContent = `M6 Ladder Blocked at ${failReason}`;
+      elBanner.style.background = "#fee2e2";
+      elBanner.style.color = "#991b1b";
+      m5Status = "validation_ladder_gate_failed";
+    } else if (task === "nanocarrier_uptake" && !swEmp) {
       elBanner.textContent = "M6 Ladder: G0-G4 PASS | G5 Blocked (Surface Association Warning: Quenched Confocal Control Required)";
       elBanner.style.background = "#fef3c7";
       elBanner.style.color = "#92400e";
@@ -2689,24 +2773,43 @@ function updateBiofilmMultiphysicsInspector() {
     }
   }
 
+  const dbParts = phDb.split(" v");
   state.biofilmMultiphysics = {
     qs_topology: topo,
+    regulatory_graph_species: spGraph,
+    regulatory_graph_valid: g4Pass,
     constitutive_maturity_level: "level1_phenomenological_hypothesis",
+    openfoam_anisotropic_audit: {
+      cell_aspect_ratio: arVal,
+      max_isotropic_courant: isoCfl,
+      max_directional_courant: dirCfl,
+      max_isotropic_peclet: isoPe,
+      max_directional_peclet: dirPe,
+      anisotropic_instability_masked_by_isotropic: !g1Pass && (isoCfl <= 1.0)
+    },
     phreeqc_database_provenance: {
-      database_name: "phreeqc.dat",
-      database_version: "3.7.3",
-      reference_electrode: "SHE",
+      thermodynamic_database: phDb,
+      database_name: dbParts[0] || "phreeqc.dat",
+      database_version: dbParts[1] || "3.7.3",
+      reference_electrode: refEl,
+      expected_eh_mv: ehObsMv,
+      database_pkw_25c: pkwDb,
       menke_2026_retardation_rel_error_pct: 0.08
+    },
+    ablation_matrix_r0_r5: {
+      n_configurations_evaluated: 17,
+      main_effects: { R1: 0.285, R2: 0.135, R3: 0.022, R4: 0.048, R5: -0.064 },
+      first_order_sensitivity_indices: { R1: 0.382, R2: 0.214, R3: 0.041, R4: 0.089, R5: 0.118 }
     },
     validation_ladder_g0_g5: {
       G0_dimensional_provenance: true,
-      G1_mesh_conservation_cfl: true,
+      G1_mesh_conservation_cfl: g1Pass,
       G2_phreeqc_thermodynamic_benchmark: true,
       G3_constitutive_transport_verification: true,
-      G4_regulatory_graph_quota_audit: true,
+      G4_regulatory_graph_quota_audit: g4Pass,
       G5_empirical_generalization_gate: false,
-      highest_passed_gate: "G4_regulatory_graph_quota_audit",
-      claim_boundary: "synthetic_numerical_verification_only"
+      highest_passed_gate: highestGate,
+      claim_boundary: (g1Pass && g4Pass) ? "synthetic_numerical_verification_only" : "verification_incomplete"
     },
     switches: {
       enable_pga_swelling_mechanics: swPga,

@@ -1370,13 +1370,7 @@ struct OpenFOAMMeshExchange
 
         vel_vecs = if isempty(velocity_vectors_m_s)
             vmat = zeros(Float64, n_cells, 3)
-            if !isempty(velocity_magnitudes_m_s)
-                length(velocity_magnitudes_m_s) == n_cells ||
-                    throw(ArgumentError("velocity_magnitudes_m_s length must equal n_cells"))
-                for i in 1:n_cells
-                    vmat[i, 1] = Float64(velocity_magnitudes_m_s[i])
-                end
-            elseif field_class == :volVectorField
+            if field_class == :volVectorField
                 for i in 1:n_cells
                     vmat[i, 1] = fld[i, 1]
                     vmat[i, 2] = fld[i, 2]
@@ -1395,7 +1389,17 @@ struct OpenFOAMMeshExchange
         vel_vec = if isempty(velocity_magnitudes_m_s)
             [hypot(vel_vecs[i, 1], vel_vecs[i, 2], vel_vecs[i, 3]) for i in 1:n_cells]
         else
-            Float64.(velocity_magnitudes_m_s)
+            length(velocity_magnitudes_m_s) == n_cells ||
+                throw(ArgumentError("velocity_magnitudes_m_s length must equal n_cells"))
+            vmag = Float64.(velocity_magnitudes_m_s)
+            if !isempty(velocity_vectors_m_s)
+                for i in 1:n_cells
+                    vhyp = hypot(vel_vecs[i, 1], vel_vecs[i, 2], vel_vecs[i, 3])
+                    isapprox(vmag[i], vhyp; rtol=1e-2, atol=1e-12) ||
+                        throw(ArgumentError("velocity_magnitudes_m_s[$i] ($(vmag[i])) does not match norm of velocity_vectors_m_s[$i,:] ($vhyp)"))
+                end
+            end
+            vmag
         end
         default_diff = field_class == :volVectorField ? 1.0e-6 : 1.0e-9
         diff_vec = isempty(diffusivities_m2_s) ? fill(default_diff, n_cells) : Float64.(diffusivities_m2_s)
@@ -1944,7 +1948,7 @@ function audit_openfoam_transport_stability(
             (u * ex.timestep_s) / min_dx
         end
         pe_dir = if (ux + uy + uz) > 0.0
-            max(ux * dx_x, uy * dx_y, uz * dx_z, u * max_dx) / max(d, 1e-18)
+            max(ux * dx_x, uy * dx_y, uz * dx_z) / max(d, 1e-18)
         else
             u > 0 ? (u * max_dx) / max(d, 1e-18) : 0.0
         end
@@ -2097,6 +2101,7 @@ struct PHREEQCSpeciesAdapter
     solver_version::String
     database_name::String
     database_version::String
+    thermodynamic_database::String
     reference_electrode::Symbol
     water_mass_kgw_per_L::Float64
     solution_density_kg_L::Float64
@@ -2121,6 +2126,7 @@ struct PHREEQCSpeciesAdapter
             solver_version::AbstractString="PHREEQC-3.7.3",
             database_name::AbstractString="phreeqc.dat",
             database_version::AbstractString="3.7.3",
+            thermodynamic_database::Union{Nothing,AbstractString}=nothing,
             reference_electrode::Symbol=:SHE,
             water_mass_kgw_per_L::Real=1.0,
             solution_density_kg_L::Real=1.0,
@@ -2139,8 +2145,22 @@ struct PHREEQCSpeciesAdapter
             source_sha256::AbstractString="")
         vid = String(strip(vessel_id))
         sver = String(strip(solver_version))
-        db = String(strip(database_name))
-        dbver = String(strip(database_version))
+        db_raw = String(strip(database_name))
+        dbver_raw = String(strip(database_version))
+        db, dbver = if thermodynamic_database === nothing
+            (db_raw, dbver_raw)
+        else
+            tdb = String(strip(thermodynamic_database))
+            !isempty(tdb) || throw(ArgumentError("thermodynamic_database must be non-empty"))
+            parts = split(tdb)
+            if length(parts) >= 2
+                ver_tok = startswith(lowercase(parts[end]), "v") ? parts[end][2:end] : parts[end]
+                (String(parts[1]), String(ver_tok))
+            else
+                (tdb, dbver_raw)
+            end
+        end
+        tdb_identity = "$(db) v$(dbver)"
         !isempty(vid) && !isempty(sver) && !isempty(db) && !isempty(dbver) ||
             throw(ArgumentError("vessel_id, solver_version, database_name, and database_version must be non-empty"))
         compartment in VALID_SAMPLE_ORIGINS ||
@@ -2220,7 +2240,7 @@ struct PHREEQCSpeciesAdapter
             d
         end
 
-        new(vid, th, compartment, sver, db, dbver, reference_electrode, w_kgw, rho_sol,
+        new(vid, th, compartment, sver, db, dbver, tdb_identity, reference_electrode, w_kgw, rho_sol,
             tc, ph_v, pe_v, eh_v, is_v,
             mol_dict, chg_dict, act_dict, elem_dict, stoich_dict, minerals,
             epistemic_status, digest)
@@ -2283,6 +2303,7 @@ function verify_phreeqc_database_compatibility(
         compatible = compatible,
         database_name = ref_db,
         database_version = ref_ver,
+        thermodynamic_database = "$(ref_db) v$(ref_ver)",
         mismatches = mismatches
     )
 end
@@ -2417,7 +2438,8 @@ function audit_phreeqc_speciation_balance(
 
     return (
         consistent = charge_ok && is_ok && elem_ok && eh_ok && ph_ok && mineral_si_ok && unit_ok,
-        database_identity = "$(adapter.database_name) v$(adapter.database_version)",
+        database_identity = adapter.thermodynamic_database,
+        thermodynamic_database = adapter.thermodynamic_database,
         reference_electrode = adapter.reference_electrode,
         charge_balance_eq_kgw = net_charge,
         charge_imbalance_pct = charge_pct,
@@ -3012,6 +3034,8 @@ const _CANONICAL_SI_EXPONENTS = Dict{Symbol,NTuple{7,Int}}(
     :electric_field_V_m              => (1, 1, -3, -1, 0, 0, 0),
     :number_density_per_m3           => (-3, 0, 0, 0, 0, 0, 0),
     :number_rate_density_per_m3_s    => (-3, 0, -1, 0, 0, 0, 0),
+    :specific_volume_m3_kg           => (3, -1, 0, 0, 0, 0, 0),
+    :inverse_molar_concentration_m3_mol => (3, 0, 0, 0, 0, -1, 0),
     :dimensionless                   => (0, 0, 0, 0, 0, 0, 0),
 )
 
@@ -3136,6 +3160,16 @@ function audit_dimensional_consistency(
         if ntuple(i -> exp_cosm[i] + exp_rho[i], 7) != exp_pa
             eq_ok = false
             push!(log_msgs, "Osmotic pressure constitutive closure dimensional check failed")
+        end
+
+        # 5. Nernst redox potential: [Eh] = [(R * T / F) * pe * ln(10)]
+        exp_R = (2, 1, -2, 0, -1, -1, 0) # J / (mol * K) = m^2 * kg / (s^2 * K * mol)
+        exp_T = _CANONICAL_SI_EXPONENTS[:temperature_K]
+        exp_F = (0, 0, 1, 1, 0, -1, 0)   # C / mol = A * s / mol
+        exp_V = _CANONICAL_SI_EXPONENTS[:electric_potential_V]
+        if ntuple(i -> exp_R[i] + exp_T[i] - exp_F[i], 7) != exp_V
+            eq_ok = false
+            push!(log_msgs, "Nernst redox potential dimensional homogeneity failed")
         end
     end
 

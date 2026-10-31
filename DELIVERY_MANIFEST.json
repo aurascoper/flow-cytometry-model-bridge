@@ -15,12 +15,12 @@
     "integrated_into_existing_openfoam_phreeqc_solvers": false,
     "julia_version": "1.13.1",
     "julia_test_command": "julia --startup-file=no code/test_FlowCytometryObservationModel.jl && julia --startup-file=no code/test_MicrofluidicClassificationEngine.jl",
-    "julia_observation_model_test_passed": 262,
-    "julia_observation_model_test_total": 262,
-    "julia_classification_engine_test_passed": 805,
-    "julia_classification_engine_test_total": 805,
-    "julia_test_passed": 1067,
-    "julia_test_total": 1067,
+    "julia_observation_model_test_passed": 279,
+    "julia_observation_model_test_total": 279,
+    "julia_classification_engine_test_passed": 895,
+    "julia_classification_engine_test_total": 895,
+    "julia_test_passed": 1174,
+    "julia_test_total": 1174,
     "model_adapter_version": "0.4.0",
     "microfluidic_engine_version": "0.4.0",
     "priorities_implemented": [
@@ -48,17 +48,17 @@
     {
       "path": "README_DELIVERY.md",
       "bytes": 10747,
-      "sha256": "5de584a6f740f52803c45d5b350d8ea45511c562890ba35bf5204d9849b74db5"
+      "sha256": "b867872d5ef2feb6bc4f1d920311d7cb8bcf63c61bb5f16f1d14bb4d1c52fb22"
     },
     {
       "path": "code/FlowCytometryObservationModel.jl",
-      "bytes": 146830,
-      "sha256": "909c9caa5124bdba1cfc81246360ab7cf76e7c0c665ec00e3de87db673cc4fe0"
+      "bytes": 148553,
+      "sha256": "d6bf339ad024b3c5815c09812e43d5a112fbbb0b691e453a6023a4b7d76ee4b5"
     },
     {
       "path": "code/MicrofluidicClassificationEngine.jl",
-      "bytes": 245391,
-      "sha256": "9c62af453f9c3090cfef9fb40e3c701a3f8a8965ba1d15d157222fd0116eade8"
+      "bytes": 272792,
+      "sha256": "d1dcb02f0d9bc492afb512e6aea9065901e72a5b7223ccb4c55a411de1d12ba8"
     },
     {
       "path": "code/flow_cytometry_samples_template.csv",
@@ -72,18 +72,18 @@
     },
     {
       "path": "code/test_FlowCytometryObservationModel.jl",
-      "bytes": 62891,
-      "sha256": "e6cdb0c9428e7c81d735b0711562259c689f010698579999e23d161a904e9ccf"
+      "bytes": 66093,
+      "sha256": "c1319b8fd563b32973ae6c4b673caa428b336cbdd8d4ee531cfe8eff7d329ed4"
     },
     {
       "path": "code/test_MicrofluidicClassificationEngine.jl",
-      "bytes": 70994,
-      "sha256": "e36c10eef1b80ad8cd34cc67c046e7f9402cb95b0fa5d406eba2c27907e9b5a3"
+      "bytes": 75351,
+      "sha256": "b7a8b53d73a80022007cc216c72ea271aae1d4e1706d09c30851f3b1ba5127df"
     },
     {
       "path": "code/verify_against_python_reference.py",
-      "bytes": 16679,
-      "sha256": "04524e97f0932d887524483408d1db3ef5ddf89f16c8e1a29ba71c87566cf04a"
+      "bytes": 30728,
+      "sha256": "f4e1c365cf5cd67f4cd2e771494b1fa70ecf30a3484862683210989a6baf17e9"
     },
     {
       "path": "docs/biofilm_openfoam_phreeqc_coupling_plan_2026-10-30.md",
@@ -187,8 +187,8 @@
     },
     {
       "path": "workbench/microfluidic_cytometry_workbench.html",
-      "bytes": 108834,
-      "sha256": "22838eeb5c7323fea5414b0138bebf33f427e38189b5d205545ea25d151bfd3d"
+      "bytes": 114362,
+      "sha256": "abe6bdf759d7a9d3a9279a88d645339829d8c3a54b13d2e905a3cda7ac0b9d7a"
     }
   ]
 }
