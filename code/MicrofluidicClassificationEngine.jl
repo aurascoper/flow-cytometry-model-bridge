@@ -2183,6 +2183,8 @@ function detect_feature_domain_shift(
         throw(ArgumentError("X_train, X_eval, and feature_names must have matching column count"))
     n_tr >= 10 && n_ev >= 5 ||
         throw(ArgumentError("detect_feature_domain_shift requires at least 10 training rows and 5 evaluation rows"))
+    all(isfinite, X_train) && all(isfinite, X_eval) ||
+        throw(ArgumentError("X_train and X_eval must contain only finite numerical values"))
     n_bins >= 4 || throw(ArgumentError("n_bins must be >= 4"))
     psi_th = Float64(psi_threshold)
     z_th = Float64(z_threshold)
@@ -2200,15 +2202,21 @@ function detect_feature_domain_shift(
         tr_col = Float64.(view(X_train, :, j))
         ev_col = Float64.(view(X_eval, :, j))
         mu_tr = mean(tr_col)
-        sd_tr = max(std(tr_col), 1e-9)
+        raw_sd_tr = std(tr_col)
+        sd_tr = max(raw_sd_tr, 1e-6)
         mu_ev = mean(ev_col)
         z_j = abs(mu_ev - mu_tr) / sd_tr
 
-        edges = quantile(tr_col, probs)
-        edges[1] = -Inf
-        edges[end] = Inf
+        raw_edges = quantile(tr_col, probs)
+        interior = unique(raw_edges[2:(end - 1)])
+        edges = if raw_sd_tr < 1e-9 || isempty(interior)
+            [-Inf, mu_tr - 3.0 * sd_tr, mu_tr + 3.0 * sd_tr, Inf]
+        else
+            vcat(-Inf, interior, Inf)
+        end
+        nb_eff = length(edges) - 1
         psi_j = 0.0
-        for b in 1:n_bins
+        for b in 1:nb_eff
             lo = edges[b]
             hi = edges[b + 1]
             cnt_tr = b == 1 ? count(x -> lo <= x <= hi, tr_col) : count(x -> lo < x <= hi, tr_col)
@@ -2628,6 +2636,8 @@ function bridge_to_observation_model(
         mesh_transport::Union{Nothing,OpenFOAMMeshExchange}=nothing,
         species_chemistry::Union{Nothing,PHREEQCSpeciesAdapter}=nothing,
         empirical_protocol::Union{Nothing,EmpiricalValidationProtocol}=nothing,
+        target_task::Union{Nothing,Symbol}=nothing,
+        heldout_run_accuracy::Real=0.90,
         vessel_id::AbstractString="CHIP-01",
         time_h::Real=1.0,
         track::Symbol=:track1_nanobio,
@@ -2715,9 +2725,20 @@ function bridge_to_observation_model(
             "PHREEQC full-species geochemical snapshot"
         ))
     end
+
+    inferred_task = if target_task !== nothing
+        target_task
+    elseif any(r -> r.prediction !== nothing && r.prediction.predicted_class in (:high_uptake_active, :low_uptake_passive, :unbound_negative), joined_records)
+        :nanocarrier_uptake
+    else
+        :cell_stress_damage
+    end
+
     effective_heldout = empirical_protocol === nothing ? heldout_validated :
         (heldout_validated && evaluate_empirical_generalization_readiness(
-            empirical_protocol; heldout_run_accuracy=0.90
+            empirical_protocol;
+            target_task = inferred_task,
+            heldout_run_accuracy = heldout_run_accuracy
         ).empirical_generalization_established)
 
     audit = build_production_audit_record(
@@ -3551,7 +3572,9 @@ end
 Solve conservative 1D finite-volume reactive transport across a spatially
 heterogeneous biofilm domain:
   dC/dt = d/dx (D_eff(x) dC/dx) - k_uptake C + S(x,t)
-with zero-flux or prescribed-flux boundaries and strict mass-balance auditing.
+using an unconditionally stable, M-matrix implicit finite-volume tridiagonal
+scheme (`LinearAlgebra.Tridiagonal`) with flux-limited boundary extraction and
+strict mass-balance auditing.
 """
 function solve_1d_reactive_transport_biofilm(;
         x_grid_m::AbstractVector{<:Real},
@@ -3583,9 +3606,11 @@ function solve_1d_reactive_transport_biofilm(;
 
     diff_field = compute_spatial_diffusivity_field(compositions, diff_spec; switches=switches)
     D_cell = diff_field.d_eff_m2_s
-    D_face = zeros(Float64, n + 1)
+    alpha_face = zeros(Float64, n - 1)
+    inv_dx2 = 1.0 / (dx * dx)
     for i in 1:(n - 1)
-        D_face[i + 1] = (2.0 * D_cell[i] * D_cell[i + 1]) / max(D_cell[i] + D_cell[i + 1], 1e-24)
+        d_harm = (2.0 * D_cell[i] * D_cell[i + 1]) / max(D_cell[i] + D_cell[i + 1], 1e-24)
+        alpha_face[i] = d_harm * inv_dx2
     end
 
     c = Float64.(initial_concentration_mol_m3)
@@ -3597,12 +3622,18 @@ function solve_1d_reactive_transport_biofilm(;
     cum_uptake = 0.0
     cum_boundary = 0.0
 
-    rate_diff = 2.2 * maximum(D_cell) / (dx * dx)
-    dt_max = 0.40 / max(rate_diff + k_up, 1e-9)
+    t_span = max(Float64(last(times_s)), 1e-6)
+    dt_max = min(0.25, t_span / 40.0)
+    if source_spec !== nothing
+        dt_max = min(dt_max, max(source_spec.pulse_duration_s / 25.0, 1e-4))
+    end
 
     profiles = Vector{Vector{Float64}}(undef, length(times_s))
     t_cur = 0.0
-    dc = zeros(Float64, n)
+    rhs = zeros(Float64, n)
+    dl = zeros(Float64, n - 1)
+    d_diag = zeros(Float64, n)
+    du = zeros(Float64, n - 1)
     f_left = Float64(boundary_left_flux_mol_m2_s)
     f_right = Float64(boundary_right_flux_mol_m2_s)
 
@@ -3611,28 +3642,49 @@ function solve_1d_reactive_transport_biofilm(;
         while t_cur < t_target - 1e-12
             dt = min(dt_max, t_target - t_cur)
             t_mid = t_cur + 0.5 * dt
-            fill!(dc, 0.0)
 
-            # Internal diffusive fluxes
+            # Assemble M-matrix tridiagonal system: (I + dt*k_up*I - dt*L) c_next = rhs
             for i in 1:(n - 1)
-                flx = -D_face[i + 1] * (c[i + 1] - c[i]) / dx
-                dc[i]     -= flx / dx
-                dc[i + 1] += flx / dx
+                off = -dt * alpha_face[i]
+                dl[i] = off
+                du[i] = off
             end
-            # Boundary fluxes (positive f_left enters cell 1; positive f_right leaves cell n)
-            dc[1] += f_left / dx
-            dc[n] -= f_right / dx
-            cum_boundary += (f_left - f_right) * dt
+            for i in 1:n
+                left_a  = i > 1 ? alpha_face[i - 1] : 0.0
+                right_a = i < n ? alpha_face[i]     : 0.0
+                d_diag[i] = 1.0 + dt * (k_up + left_a + right_a)
+            end
 
+            step_source = 0.0
             for i in 1:n
                 src_i = source_spec === nothing ? 0.0 :
                     evaluate_localized_source_term(x_vec[i], t_mid, source_spec; switches=switches)
-                up_i = k_up * c[i]
-                dc[i] += src_i - up_i
-                cum_source += src_i * dx * dt
-                cum_uptake += up_i * dx * dt
-                c[i] = max(0.0, c[i] + dt * dc[i])
+                rhs[i] = c[i] + dt * src_i
+                step_source += src_i * dx * dt
             end
+
+            # Implicit boundary extraction sink rates when outflow is prescribed
+            k_left_out  = (f_left < 0.0 && rhs[1] > 0.0) ? (-f_left) / (rhs[1] * dx + (-f_left) * dt) : 0.0
+            k_right_out = (f_right > 0.0 && rhs[n] > 0.0) ? f_right / (rhs[n] * dx + f_right * dt) : 0.0
+            d_diag[1] += dt * k_left_out
+            d_diag[n] += dt * k_right_out
+
+            f_left_in  = f_left > 0.0 ? f_left : 0.0
+            f_right_in = f_right < 0.0 ? (-f_right) : 0.0
+            rhs[1] += (dt / dx) * f_left_in
+            rhs[n] += (dt / dx) * f_right_in
+
+            c_next = Tridiagonal(dl, d_diag, du) \ rhs
+            for i in 1:n
+                c[i] = max(0.0, c_next[i])
+            end
+
+            f_left_eff  = f_left_in - k_left_out * c[1] * dx
+            f_right_eff = k_right_out * c[n] * dx - f_right_in
+
+            cum_source += step_source
+            cum_boundary += (f_left_eff - f_right_eff) * dt
+            cum_uptake += k_up * sum(c) * dx * dt
             t_cur += dt
         end
         profiles[snap_idx] = copy(c)

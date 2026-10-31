@@ -592,6 +592,53 @@ using .FlowCytometryObservationModel
         @test snap_from_mesh.vessel_id == "V07"
         @test validate_solver_observation_alignment(sample, "V07", 168.0; mesh_transport=ex)
 
+        # Standard OpenFOAM C++ banner/footer comments, scientific notation (1.e-5, .5), and uniform patch values
+        commented_ascii = """
+        /*--------------------------------*- C++ -*----------------------------------*\\
+          =========                 |
+          \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+        \\*---------------------------------------------------------------------------*/
+        FoamFile
+        {
+            version     2.0; // standard header
+            format      ascii;
+            class       volScalarField;
+            object      C_commented;
+        }
+        // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+        dimensions [0 -3 0 0 1 0 0];
+        internalField nonuniform List<scalar> 6 ( 1.5 .5 1.e-5 2.0 3.0 4.0 );
+        boundaryField
+        {
+            inlet
+            {
+                type fixedValue;
+                flux_mol_s 1.2e-9;
+                value uniform 1.5;
+            }
+            walls
+            {
+                type zeroGradient;
+            }
+        }
+        // ************************************************************************* //
+        """
+        commented_parsed = parse_openfoam_ascii_field(
+            commented_ascii;
+            vessel_id = "V07", time_h = 168.0, timestep_s = 0.05,
+            compartment = :detached_biofilm, cell_centers_m = centers, cell_volumes_m3 = vols
+        )
+        @test length(commented_parsed.boundary_patches) == 2
+        @test commented_parsed.boundary_patches[1].name == "inlet"
+        @test isapprox(commented_parsed.boundary_patches[1].values[1], 1.5; atol=1e-12)
+        @test isapprox(commented_parsed.internal_field[2, 1], 0.5; atol=1e-12)
+        @test isapprox(commented_parsed.internal_field[3, 1], 1.0e-5; atol=1e-12)
+
+        # Vector field stability audit permits signed velocity components by default
+        stab_vec = audit_openfoam_transport_stability(ex_vec; max_courant=1.0, max_peclet=10_000.0)
+        @test stab_vec.stable
+        @test stab_vec.total_integrated_amount > 0.0
+
         ex_wrong_vessel = OpenFOAMMeshExchange(
             vessel_id = "V99", time_h = 168.0, timestep_s = 0.05,
             compartment = :detached_biofilm, cell_centers_m = centers,
@@ -646,6 +693,7 @@ using .FlowCytometryObservationModel
             for (sp, z) in charges
         )
         act_coeffs["H+"] = 1.0 # so -log10(a_H+) == 7.0 == pH
+        act_coeffs["OH-"] = 1.0 # so -log10(a_H+ * a_OH-) == 14.0 == pKw(25 C)
 
         stoich = Dict{String,Dict{String,Float64}}(
             "Ca+2" => Dict("Ca" => 1.0),
@@ -669,10 +717,12 @@ using .FlowCytometryObservationModel
             "Cl" => cl_minus
         )
         ionic_str = 0.5 * sum((charges[sp]^2) * m for (sp, m) in molalities)
+        gypsum_si = -1.12
+        gypsum_log_ksp = log10((0.72 * ca_free) * (0.72 * so4)) - gypsum_si
         minerals = [
             PHREEQCMineralPhase("Calcite", "CaCO3"; saturation_index=0.18, moles_mol_L=0.002, delta_moles_mol_L=1.5e-5),
             PHREEQCMineralPhase("Mackinawite", "FeS"; saturation_index=0.65, moles_mol_L=0.0004, delta_moles_mol_L=3.0e-5),
-            PHREEQCMineralPhase("Gypsum", "CaSO4:2H2O"; saturation_index=-1.12, moles_mol_L=0.0, delta_moles_mol_L=0.0)
+            PHREEQCMineralPhase("Gypsum", "CaSO4:2H2O"; saturation_index=gypsum_si, moles_mol_L=0.0, delta_moles_mol_L=0.0)
         ]
 
         ph_adapter = PHREEQCSpeciesAdapter(
@@ -690,14 +740,19 @@ using .FlowCytometryObservationModel
             mineral_phases = minerals
         )
 
-        audit = audit_phreeqc_speciation_balance(ph_adapter)
+        rxn_defs = Dict(
+            "Gypsum" => (stoichiometry = Dict("Ca+2" => 1.0, "SO4-2" => 1.0), log10_ksp = gypsum_log_ksp)
+        )
+        audit = audit_phreeqc_speciation_balance(ph_adapter; mineral_reactions=rxn_defs)
         @test audit.consistent
         @test abs(audit.charge_imbalance_pct) < 1e-9
         @test audit.ionic_strength_consistent
+        @test !audit.high_ionic_strength_pitzer_recommended
         @test audit.element_balance_consistent
         @test audit.max_element_rel_error < 1e-12
         @test audit.nernst_eh_consistent
         @test audit.ph_activity_consistent
+        @test audit.mineral_si_consistent
         @test "Calcite" in audit.supersaturated_minerals
         @test "Mackinawite" in audit.supersaturated_minerals
         @test "Gypsum" in audit.undersaturated_minerals
@@ -710,7 +765,7 @@ using .FlowCytometryObservationModel
             species_activity_coeffs = act_coeffs,
             species_stoichiometry = stoich
         )
-        audit_parsed = audit_phreeqc_speciation_balance(ph_parsed)
+        audit_parsed = audit_phreeqc_speciation_balance(ph_parsed; mineral_reactions=rxn_defs)
         @test audit_parsed.consistent
         @test isapprox(ph_parsed.species_molalities_mol_kgw["Fe+2"], fe2_free; rtol=1e-9)
         @test length(ph_parsed.mineral_phases) == 3
@@ -721,7 +776,7 @@ using .FlowCytometryObservationModel
         @test isapprox(snap_chem.sulfide_mol_L, hs_minus + h2s_aq; rtol=1e-10)
         @test validate_solver_observation_alignment(sample, "V07", 168.0; species_chemistry=ph_adapter)
 
-        # Detect severe charge or element imbalance
+        # Detect severe charge, element, missing-stoichiometry, Kw, or mineral SI imbalance
         bad_elem_totals = copy(elem_totals)
         bad_elem_totals["Ca"] = 0.050 # 5x higher than species sum
         ph_bad_el = PHREEQCSpeciesAdapter(
@@ -733,6 +788,21 @@ using .FlowCytometryObservationModel
         audit_bad = audit_phreeqc_speciation_balance(ph_bad_el)
         @test !audit_bad.consistent
         @test !audit_bad.element_balance_consistent
+
+        ph_bad_kw_si = PHREEQCSpeciesAdapter(
+            vessel_id = "V07", time_h = 168.0, compartment = :effluent,
+            pH = 0.0, pe = 4.0, ionic_strength_M = 1.5,
+            species_molalities_mol_kgw = Dict("H+" => 1.0, "OH-" => 1.0, "Na+" => 0.5, "Cl-" => 0.5),
+            species_charges = Dict("H+" => 1, "OH-" => -1, "Na+" => 1, "Cl-" => -1),
+            element_totals_mol_kgw = Dict("Ca" => 0.25), # missing stoichiometry
+            mineral_phases = [PHREEQCMineralPhase("Gypsum", "CaSO4"; saturation_index=-2.0, moles_mol_L=0.0, delta_moles_mol_L=0.02)]
+        )
+        audit_bad_kw = audit_phreeqc_speciation_balance(ph_bad_kw_si)
+        @test !audit_bad_kw.consistent
+        @test !audit_bad_kw.element_balance_consistent
+        @test !audit_bad_kw.ph_activity_consistent
+        @test !audit_bad_kw.mineral_si_consistent
+        @test audit_bad_kw.high_ionic_strength_pitzer_recommended
     end
 
     # -----------------------------------------------------------------------

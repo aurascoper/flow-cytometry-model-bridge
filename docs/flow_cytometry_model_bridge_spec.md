@@ -1,6 +1,6 @@
 # Flow cytometry as the observation layer for coupled flow-geochemistry-biofilm models
 
-**Status:** standalone observation-model interface specification and calibrated verification suite (`MODEL_ADAPTER_VERSION = "0.3.0"`, `ENGINE_VERSION = "0.3.0"`), verified with 177/177 local Julia unit assertions in `code/test_FlowCytometryObservationModel.jl` and 687/687 local Julia unit assertions in `code/test_MicrofluidicClassificationEngine.jl` (864/864 combined). Not yet coupled into external OpenFOAM or PHREEQC production solver repositories (`integrated_into_existing_openfoam_phreeqc_solvers: false`).
+**Status:** standalone observation-model interface specification and calibrated verification suite (`MODEL_ADAPTER_VERSION = "0.3.0"`, `ENGINE_VERSION = "0.3.0"`), verified with 191/191 local Julia unit assertions in `code/test_FlowCytometryObservationModel.jl` and 692/692 local Julia unit assertions in `code/test_MicrofluidicClassificationEngine.jl` (883/883 combined). Not yet coupled into external OpenFOAM or PHREEQC production solver repositories (`integrated_into_existing_openfoam_phreeqc_solvers: false`).
 
 ## 1. Scientific rationale and literature anchors
 
@@ -126,12 +126,12 @@ The software contract (`StakeholderTrackContract`, `OpenFOAMTransportSnap`, `PHR
 - [x] Raw cytometry schema (`code/flow_cytometry_samples_template.csv`) validated against `REQUIRED_CSV_COLUMNS` via `validate_sample_csv_header`.
 - [x] Calibration confusion matrix, detection efficiency, MESF curves, bead size curves, and extraction recovery estimated from independent control constructors (`estimate_gate_calibration`, `fit_mesf_calibration`, `fit_bead_size_calibration`).
 - [x] Solver snapshots (`OpenFOAMTransportSnap`, `PHREEQCSpeciationSnap`, `OpenFOAMMeshExchange`, `PHREEQCSpeciesAdapter`) checked for exact vessel, time, and compartment alignment via `validate_solver_observation_alignment`.
-- [x] Unit test suite (`code/test_FlowCytometryObservationModel.jl`) executed locally in Julia 1.13.1 (`177/177` passing assertions) covering concentration-likelihood consistency, synthetic-data recovery, zero/low counts, uncertainty propagation, equifinality, held-out posterior-predictive checks, OpenFOAM mesh field mapping, PHREEQC speciation balance, and empirical validation protocols.
+- [x] Unit test suite (`code/test_FlowCytometryObservationModel.jl`) executed locally in Julia 1.13.1 (`191/191` passing assertions) covering concentration-likelihood consistency, synthetic-data recovery, zero/low counts, uncertainty propagation, equifinality, held-out posterior-predictive checks, OpenFOAM mesh field mapping, PHREEQC speciation balance, and empirical validation protocols.
 - [x] All outputs explicitly tagged as `:observed`, `:calibrated`, `:assumed`, or `:predicted` via `EpistemicQuantity` and `ProductionAuditRecord`.
 
 ## 10. Microfluidic Cell Classification Workbench and Shared 3D Visualization Engine
 
-`code/MicrofluidicClassificationEngine.jl` (`ENGINE_VERSION = "0.3.0"`) extends the standalone observation-model adapter into a complete Julia-first microfluidic single-cell classification engine, biofilm multiphysics coupling layer, and interactive browser workbench (`workbench/microfluidic_cytometry_workbench.html`), verified with `687/687` passing Julia unit assertions (`julia --startup-file=no code/test_MicrofluidicClassificationEngine.jl`) and cross-language numerical verification against an independent Python reference implementation (`code/verify_against_python_reference.py`).
+`code/MicrofluidicClassificationEngine.jl` (`ENGINE_VERSION = "0.3.0"`) extends the standalone observation-model adapter into a complete Julia-first microfluidic single-cell classification engine, biofilm multiphysics coupling layer, and interactive browser workbench (`workbench/microfluidic_cytometry_workbench.html`), verified with `692/692` passing Julia unit assertions (`julia --startup-file=no code/test_MicrofluidicClassificationEngine.jl`) and cross-language numerical verification against an independent Python reference implementation (`code/verify_against_python_reference.py`).
 
 ### 10.1 Modular Julia architecture
 

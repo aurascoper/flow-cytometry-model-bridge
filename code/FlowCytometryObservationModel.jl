@@ -1309,7 +1309,8 @@ struct OpenFOAMMeshExchange
         all(isfinite, fld) || throw(ArgumentError("internal_field entries must be finite"))
 
         vel_vec = isempty(velocity_magnitudes_m_s) ? zeros(Float64, n_cells) : Float64.(velocity_magnitudes_m_s)
-        diff_vec = isempty(diffusivities_m2_s) ? fill(1.0e-9, n_cells) : Float64.(diffusivities_m2_s)
+        default_diff = field_class == :volVectorField ? 1.0e-6 : 1.0e-9
+        diff_vec = isempty(diffusivities_m2_s) ? fill(default_diff, n_cells) : Float64.(diffusivities_m2_s)
         length(vel_vec) == n_cells ||
             throw(ArgumentError("velocity_magnitudes_m_s length must equal n_cells"))
         length(diff_vec) == n_cells ||
@@ -1395,8 +1396,22 @@ function serialize_openfoam_ascii_field(ex::OpenFOAMMeshExchange)
 end
 
 """
+Strip C/C++ multi-line (`/* ... */`) and single-line (`// ...`) comments from an
+OpenFOAM ASCII dictionary string before token/regex parsing.
+"""
+function _strip_openfoam_comments(txt::AbstractString)
+    no_block = replace(String(txt), r"/\*.*?\*/"s => " ")
+    return replace(no_block, r"//[^\n\r]*" => "")
+end
+
+const _OF_FLOAT_PATTERN = r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?"
+
+"""
 Parse an OpenFOAM v2.0 ASCII field dictionary (`volScalarField` or `volVectorField`)
 into an `OpenFOAMMeshExchange` struct and record SHA-256 provenance of the raw text.
+Supports standard OpenFOAM C/C++ header/footer comments, inline comments,
+`uniform` and `nonuniform List<scalar|vector>` internal fields, and `uniform` or
+`nonuniform` boundary patch values.
 """
 function parse_openfoam_ascii_field(
         ascii_text::AbstractString;
@@ -1411,7 +1426,8 @@ function parse_openfoam_ascii_field(
         velocity_magnitudes_m_s::AbstractVector{<:Real}=Float64[],
         diffusivities_m2_s::AbstractVector{<:Real}=Float64[],
         epistemic_status::Symbol=:predicted)
-    txt = String(ascii_text)
+    raw_txt = String(ascii_text)
+    txt = _strip_openfoam_comments(raw_txt)
     occursin("FoamFile", txt) ||
         throw(ArgumentError("OpenFOAM dictionary is missing FoamFile header"))
 
@@ -1433,7 +1449,7 @@ function parse_openfoam_ascii_field(
     internal_mat = Matrix{Float64}(undef, n_cells, field_class == :volScalarField ? 1 : 3)
 
     if field_class == :volScalarField
-        unif_m = match(r"internalField\s+uniform\s+([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*;", txt)
+        unif_m = match(r"internalField\s+uniform\s+([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*;", txt)
         if unif_m !== nothing
             val = parse(Float64, unif_m.captures[1])
             fill!(internal_mat, val)
@@ -1469,7 +1485,8 @@ function parse_openfoam_ascii_field(
             n_declared = parse(Int, nonunif_v.captures[1])
             n_declared == n_cells ||
                 throw(ArgumentError("OpenFOAM vector internalField count ($n_declared) does not match mesh cell count ($n_cells)"))
-            vec_matches = collect(eachmatch(r"\(\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s+([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s+([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*\)", nonunif_v.captures[2]))
+            vec_pat = r"\(\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s+([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s+([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*\)"
+            vec_matches = collect(eachmatch(vec_pat, nonunif_v.captures[2]))
             length(vec_matches) == n_cells ||
                 throw(ArgumentError("parsed $(length(vec_matches)) vectors, expected $n_cells"))
             for i in 1:n_cells
@@ -1481,7 +1498,7 @@ function parse_openfoam_ascii_field(
     end
 
     patches = OpenFOAMBoundaryPatch[]
-    bf_m = match(r"boundaryField\s*\{(.*)\}\s*\z"s, txt)
+    bf_m = match(r"boundaryField\s*\{(.*)\}\s*$"s, strip(txt))
     if bf_m !== nothing
         bf_body = bf_m.captures[1]
         for pm in eachmatch(r"([A-Za-z0-9_.-]+)\s*\{([^{}]*)\}", bf_body)
@@ -1489,15 +1506,26 @@ function parse_openfoam_ascii_field(
             pbody = pm.captures[2]
             tm = match(r"type\s+([A-Za-z0-9_]+)\s*;", pbody)
             ptype = tm === nothing ? :zeroGradient : Symbol(tm.captures[1])
-            fm = match(r"flux_mol_s\s+([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*;", pbody)
+            fm = match(r"flux_mol_s\s+([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*;", pbody)
             flx = fm === nothing ? 0.0 : parse(Float64, fm.captures[1])
-            vm = match(r"value\s+nonuniform\s+List<scalar>\s+\d+\s*\(\s*([^)]*)\)\s*;", pbody)
-            vals = vm === nothing ? Float64[] : [parse(Float64, s) for s in split(strip(vm.captures[1])) if !isempty(s)]
+
+            vm_list = match(r"value\s+nonuniform\s+List<scalar>\s+\d+\s*\(\s*([^)]*)\)\s*;", pbody)
+            vm_unif_s = match(r"value\s+uniform\s+([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*;", pbody)
+            vm_unif_v = match(r"value\s+uniform\s*\(\s*([^\)]+)\s*\)\s*;", pbody)
+            vals = if vm_list !== nothing
+                [parse(Float64, s) for s in split(strip(vm_list.captures[1])) if !isempty(s)]
+            elseif vm_unif_s !== nothing
+                [parse(Float64, vm_unif_s.captures[1])]
+            elseif vm_unif_v !== nothing
+                [parse(Float64, s) for s in split(strip(vm_unif_v.captures[1])) if !isempty(s)]
+            else
+                Float64[]
+            end
             push!(patches, OpenFOAMBoundaryPatch(pname, ptype, vals; flux_mol_s=flx))
         end
     end
 
-    digest = bytes2hex(SHA.sha256(txt))
+    digest = bytes2hex(SHA.sha256(raw_txt))
     return OpenFOAMMeshExchange(
         vessel_id = vessel_id,
         time_h = time_h,
@@ -1595,12 +1623,15 @@ end
 """
 Audit OpenFOAM transport numerical stability, Courant-Friedrichs-Lewy (CFL)
 number, grid Peclet number, nonnegativity, and integrated mass/flux balance.
+For `:volScalarField`, nonnegativity is enforced by default (`require_nonnegative=true`);
+for `:volVectorField`, signed vector components are permitted by default unless
+`require_nonnegative=true` is explicitly requested.
 """
 function audit_openfoam_transport_stability(
         ex::OpenFOAMMeshExchange;
         max_courant::Real=1.0,
         max_peclet::Real=50.0,
-        require_nonnegative::Bool=true)
+        require_nonnegative::Union{Nothing,Bool}=nothing)
     co_lim = Float64(max_courant)
     pe_lim = Float64(max_peclet)
     co_lim > 0 && pe_lim > 0 ||
@@ -1612,6 +1643,9 @@ function audit_openfoam_transport_stability(
     for i in 1:n
         dx = cbrt(ex.cell_volumes_m3[i])
         u = ex.velocity_magnitudes_m_s[i]
+        if u == 0.0 && ex.field_class == :volVectorField
+            u = hypot(ex.internal_field[i, 1], ex.internal_field[i, 2], ex.internal_field[i, 3])
+        end
         d = ex.diffusivities_m2_s[i]
         co_i = (u * ex.timestep_s) / dx
         pe_i = u > 0 ? (u * dx) / max(d, 1e-18) : 0.0
@@ -1625,10 +1659,15 @@ function audit_openfoam_transport_stability(
 
     min_val = minimum(ex.internal_field)
     max_val = maximum(ex.internal_field)
-    total_amt = sum(ex.internal_field[i, 1] * ex.cell_volumes_m3[i] for i in 1:n)
+    total_amt = if ex.field_class == :volScalarField
+        sum(ex.internal_field[i, 1] * ex.cell_volumes_m3[i] for i in 1:n)
+    else
+        sum(hypot(ex.internal_field[i, 1], ex.internal_field[i, 2], ex.internal_field[i, 3]) * ex.cell_volumes_m3[i] for i in 1:n)
+    end
     net_flux = isempty(ex.boundary_patches) ? 0.0 : sum(p.flux_mol_s for p in ex.boundary_patches)
 
-    nonneg_ok = (!require_nonnegative) || (min_val >= -1e-12)
+    enforce_nonneg = require_nonnegative === nothing ? (ex.field_class == :volScalarField) : require_nonnegative
+    nonneg_ok = (!enforce_nonneg) || (min_val >= -1e-12)
     stable = (max_co <= co_lim) && (max_pe <= pe_lim) && nonneg_ok
     return (
         stable = stable,
@@ -1754,7 +1793,7 @@ struct PHREEQCSpeciesAdapter
         is_v = Float64(ionic_strength_M)
         isfinite(th) && th >= 0 || throw(ArgumentError("time_h must be finite and >= 0"))
         isfinite(tc) && tc > -273.15 || throw(ArgumentError("temperature_c must be > -273.15"))
-        isfinite(ph_v) && 0 <= ph_v <= 14 || throw(ArgumentError("pH must be in [0, 14]"))
+        isfinite(ph_v) && -2.0 <= ph_v <= 16.0 || throw(ArgumentError("pH must be in [-2.0, 16.0]"))
         isfinite(pe_v) || throw(ArgumentError("pe must be finite"))
         isfinite(is_v) && is_v >= 0 || throw(ArgumentError("ionic_strength_M must be finite and >= 0"))
 
@@ -1819,19 +1858,23 @@ end
 
 """
 Audit charge balance, element conservation, ionic strength, Nernst Eh-pe
-consistency, pH activity consistency, and mineral saturation states for a
-`PHREEQCSpeciesAdapter`.
+consistency, pH and water autoionization (`Kw`) activity consistency, and
+mineral saturation states (`SI = log10(IAP / Ksp)` and thermodynamic
+precipitation rules) for a `PHREEQCSpeciesAdapter`.
 """
 function audit_phreeqc_speciation_balance(
         adapter::PHREEQCSpeciesAdapter;
         max_charge_imbalance_pct::Real=2.0,
         rtol_element::Real=1e-4,
         rtol_ionic_strength::Real=0.05,
-        atol_eh_volts::Real=0.005)
+        atol_eh_volts::Real=0.005,
+        atol_si::Real=0.08,
+        mineral_reactions::Dict{String,<:NamedTuple}=Dict{String,NamedTuple}())
     max_ci = Float64(max_charge_imbalance_pct)
     rtol_el = Float64(rtol_element)
     rtol_is = Float64(rtol_ionic_strength)
     atol_eh = Float64(atol_eh_volts)
+    tol_si = Float64(atol_si)
 
     pos_eq = 0.0
     neg_eq = 0.0
@@ -1859,25 +1902,31 @@ function audit_phreeqc_speciation_balance(
 
     max_el_rel_err = 0.0
     elem_ok = true
-    if !isempty(adapter.element_totals_mol_kgw) && !isempty(adapter.species_stoichiometry)
-        for (el, tot_expected) in adapter.element_totals_mol_kgw
-            tot_calc = 0.0
-            for (sp, m) in adapter.species_molalities_mol_kgw
-                if haskey(adapter.species_stoichiometry, sp) && haskey(adapter.species_stoichiometry[sp], el)
-                    tot_calc += adapter.species_stoichiometry[sp][el] * m
+    if !isempty(adapter.element_totals_mol_kgw)
+        if isempty(adapter.species_stoichiometry)
+            elem_ok = any(v -> v > 0.0, values(adapter.element_totals_mol_kgw)) ? false : true
+            max_el_rel_err = elem_ok ? 0.0 : 1.0
+        else
+            for (el, tot_expected) in adapter.element_totals_mol_kgw
+                tot_calc = 0.0
+                for (sp, m) in adapter.species_molalities_mol_kgw
+                    if haskey(adapter.species_stoichiometry, sp) && haskey(adapter.species_stoichiometry[sp], el)
+                        tot_calc += adapter.species_stoichiometry[sp][el] * m
+                    end
                 end
-            end
-            rel_err = abs(tot_calc - tot_expected) / max(tot_expected, 1e-15)
-            if rel_err > max_el_rel_err
-                max_el_rel_err = rel_err
-            end
-            if rel_err > rtol_el
-                elem_ok = false
+                rel_err = abs(tot_calc - tot_expected) / max(tot_expected, 1e-15)
+                if rel_err > max_el_rel_err
+                    max_el_rel_err = rel_err
+                end
+                if rel_err > rtol_el
+                    elem_ok = false
+                end
             end
         end
     end
 
-    nernst_factor = (8.314462618 * (adapter.temperature_c + 273.15) * log(10.0)) / 96485.33212
+    T_K = adapter.temperature_c + 273.15
+    nernst_factor = (8.314462618 * T_K * log(10.0)) / 96485.33212
     expected_eh = nernst_factor * adapter.pe
     eh_ok = abs(adapter.eh_volts - expected_eh) <= atol_eh
 
@@ -1886,21 +1935,59 @@ function audit_phreeqc_speciation_balance(
         ph_from_act = -log10(activities["H+"])
         ph_ok = abs(ph_from_act - adapter.pH) <= 0.08
     end
+    if ph_ok && haskey(activities, "H+") && haskey(activities, "OH-") &&
+       activities["H+"] > 0 && activities["OH-"] > 0
+        pkw_T = 4471.33 / T_K - 6.0846 + 0.017053 * T_K
+        pk_obs = -log10(activities["H+"]) - log10(activities["OH-"])
+        if abs(pk_obs - pkw_T) > 0.35
+            ph_ok = false
+        end
+    end
+
+    mineral_si_ok = true
+    for mp in adapter.mineral_phases
+        # An undersaturated mineral (SI < -tol_si) cannot precipitate (delta_moles > 0) at equilibrium
+        if mp.saturation_index < -tol_si && mp.delta_moles_mol_L > 1e-12
+            mineral_si_ok = false
+        end
+        if haskey(mineral_reactions, mp.name)
+            rxn = mineral_reactions[mp.name]
+            log_iap = 0.0
+            valid_iap = true
+            for (sp_name, nu_coeff) in rxn.stoichiometry
+                if haskey(activities, sp_name) && activities[sp_name] > 0
+                    log_iap += Float64(nu_coeff) * log10(activities[sp_name])
+                else
+                    valid_iap = false
+                end
+            end
+            if valid_iap
+                calc_si = log_iap - Float64(rxn.log10_ksp)
+                if abs(calc_si - mp.saturation_index) > tol_si
+                    mineral_si_ok = false
+                end
+            else
+                mineral_si_ok = false
+            end
+        end
+    end
 
     supersat = [m.name for m in adapter.mineral_phases if m.saturation_index > 0.0]
     undersat = [m.name for m in adapter.mineral_phases if m.saturation_index < 0.0]
 
     return (
-        consistent = charge_ok && is_ok && elem_ok && eh_ok && ph_ok,
+        consistent = charge_ok && is_ok && elem_ok && eh_ok && ph_ok && mineral_si_ok,
         charge_balance_eq_kgw = net_charge,
         charge_imbalance_pct = charge_pct,
         charge_balance_ok = charge_ok,
         computed_ionic_strength_M = calc_is,
         ionic_strength_consistent = is_ok,
+        high_ionic_strength_pitzer_recommended = adapter.ionic_strength_M > 1.0,
         element_balance_consistent = elem_ok,
         max_element_rel_error = max_el_rel_err,
         nernst_eh_consistent = eh_ok,
         ph_activity_consistent = ph_ok,
+        mineral_si_consistent = mineral_si_ok,
         activities_mol_kgw = activities,
         supersaturated_minerals = supersat,
         undersaturated_minerals = undersat

@@ -129,6 +129,23 @@ Use OpenFOAM for transport/shear, PHREEQC for aqueous chemistry/mineral equilibr
 
 Keep the existing emulsion droplet/interface model and constitutive fitting separate. Use Julia for temperature-dependent constitutive relations/uncertainty and OpenFOAM for multiphase/interfacial flow as needed. Validate with DSR and moisture-susceptibility evidence. Do not attach biological release shells, flow-cytometry observation models or clay-microbe PHREEQC chemistry to this track. Share rendering, provenance and data-contract infrastructure only.
 
+## Implementation cautions found in current source
+
+1. The synthetic-data generator in `MicrofluidicClassificationEngine.jl` assigns feature distributions and labels by construction. Strong cross-validation performance therefore demonstrates recoverability under the generator, not real-world assay classification. `EmpiricalValidationProtocol`, `evaluate_empirical_generalization_readiness`, and `audit_classifier_empirical_generalization` enforce this distinction programmatically until real de-identified, expert-labelled data and independent controls are available.
+2. `OpenFOAMTransportSnap` stores scalar summaries such as velocity, wall shear and residence time, whereas `OpenFOAMMeshExchange` and `map_openfoam_field_conservative` provide the mesh-aware field schema and volume-weighted conservative mapping required for spatial coupling.
+3. `PHREEQCSpeciationSnap` stores scalar concentrations/speciation values, whereas `PHREEQCSpeciesAdapter` and `audit_phreeqc_speciation_balance` represent full species vectors, activity coefficients, mineral inventories, Nernst $E_h\text{-}pe$ consistency, water autoionization ($K_w$), and charge/element/SI balance audits.
+4. The core-multishell, emulsion, and `BiofilmMultiphysics` tests verify internal/synthetic numerical relations and conservation laws with prescribed inputs. They do not validate the physical models against Ghosh's, Jack's, or clay-pilot wet-lab experiments.
+5. Solver integration claims (`integrated_into_existing_openfoam_phreeqc_solvers`) must remain `false` until external solver repositories, versioned adapters, test cases, and empirical/benchmark validation have actually been completed.
+
+## Recommended repository next steps
+
+1. Maintain versioned coupling-schema documentation and independent schema/unit/time/mesh/compartment validation tests (`OpenFOAMMeshExchange`, `PHREEQCSpeciesAdapter`).
+2. Pair the offline OpenFOAM ASCII export/import parser and PHREEQC selected-output TSV/CSV adapter with recorded solver versions and input decks from the Track 2 pilot.
+3. Verify conservative scalar and 1D reactive transport test cases (`solve_1d_reactive_transport_biofilm`, `map_openfoam_field_conservative`) against analytical and mass-balance invariants.
+4. Keep matrix mechanics, nutrient quota, QS/QQ topology, EV production, and matrix-dependent diffusivity independently switchable via `BiofilmHypothesisSwitches` in `BiofilmMultiphysics`.
+5. Enforce `EmpiricalValidationProtocol` and `audit_classifier_empirical_generalization` on all experimental validation reports without fabricated measurements.
+6. Only after wet-lab calibration and offline snapshot benchmarks pass, open focused PRs in the external OpenFOAM and PHREEQC solver repositories.
+
 ## Decision
 
 **Proceed with modular interfaces and one-way snapshot coupling first.** Keep biological and matrix constitutive logic in Julia, spatial transport in OpenFOAM, aqueous speciation in PHREEQC, and FCS as an observation layer. Promote two-way multiphysics coupling only when data support the constitutive feedbacks and conservation/validation tests pass.

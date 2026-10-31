@@ -736,6 +736,19 @@ using .MicrofluidicClassificationEngine
         @test rt_sol.cumulative_uptake_mol_m2 > 0.0
         @test maximum(rt_sol.profiles_mol_m3[3]) > 0.10
 
+        # Boundary extraction outflow and sub-nanometer grid remain strictly mass-conserving
+        rt_outflow = solve_1d_reactive_transport_biofilm(
+            x_grid_m = collect(range(0.0, 7.0e-9; length=8)),
+            times_s = [0.0, 5.0, 10.0],
+            compositions = comps_1d[1:8],
+            diff_spec = diff_large_cationic,
+            initial_concentration_mol_m3 = fill(0.001, 8),
+            first_order_uptake_s = 0.05,
+            boundary_right_flux_mol_m2_s = 1.0e-4
+        )
+        @test rt_outflow.mass_conserved
+        @test rt_outflow.relative_mass_balance_error < 1e-8
+
         # 6D. M4: Electrokinetic / ROS AHL degradation in supernatant vs intact biofilm (Oct 17, 2026)
         ek_spec = ElectrokineticQSSpec(
             electric_field_v_m = 2000.0,
@@ -853,6 +866,15 @@ using .MicrofluidicClassificationEngine
         @test !shift_in_dist.shifted
         @test shift_in_dist.max_abs_z_shift < 1.0
 
+        # Non-finite values in X_train or X_eval are rejected, and constant/tied features tolerate machine-epsilon noise
+        X_nan = copy(f2.features)
+        X_nan[1, 1] = NaN
+        @test_throws ArgumentError detect_feature_domain_shift(f1.features, X_nan; feature_names=f1.feature_names)
+        X_const_tr = zeros(Float64, 20, 2)
+        X_const_ev = fill(1.0e-12, 10, 2)
+        shift_const = detect_feature_domain_shift(X_const_tr, X_const_ev; feature_names=["c1", "c2"])
+        @test !shift_const.shifted
+
         # Perturbed out-of-distribution evaluation matrix triggers domain-shift alert
         X_shifted = copy(f2.features)
         X_shifted[:, 1] .+= 4.5 .* std(f1.features[:, 1])
@@ -965,6 +987,27 @@ using .MicrofluidicClassificationEngine
         @test !bridge_mp.audit_record.heldout_validated
         @test any(q -> startswith(q.name, "openfoam_mesh_exchange_"), bridge_mp.audit_record.quantities)
         @test any(q -> q.name == "phreeqc_species_ph", bridge_mp.audit_record.quantities)
+
+        # Experimental protocol without quenched internalization imaging on :nanocarrier_uptake also downgrades heldout_validated
+        emp_no_img_proto = EmpiricalValidationProtocol(
+            protocol_id = "EMP-UPTAKE-NO-IMG",
+            track = :track1_nanobio,
+            data_provenance = :deidentified_experimental_fcs,
+            independent_reference_labels = true,
+            counting_beads_verified = true,
+            internalization_imaging_verified = false,
+            n_independent_runs = 3,
+            n_heldout_runs = 1
+        )
+        bridge_no_img = bridge_to_observation_model(
+            joined, fcm_up.sample_summary, cal;
+            state_prediction = fcm_up.state_prediction,
+            empirical_protocol = emp_no_img_proto,
+            vessel_id = "CHIP-02",
+            time_h = 2.0,
+            heldout_validated = true
+        )
+        @test !bridge_no_img.audit_record.heldout_validated
     end
 end
 

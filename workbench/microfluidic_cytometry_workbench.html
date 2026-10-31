@@ -837,13 +837,16 @@
           <option value="pseudomonas_lasi_lasr">P. aeruginosa LasI-LasR</option>
         </select>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px;font-size:10.5px;margin:5px 0;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px;font-size:10px;margin:5px 0;">
         <label><input type="checkbox" id="sw-pga-swell" checked onchange="updateBiofilmMultiphysicsInspector()"> M3: PGA Swelling</label>
         <label><input type="checkbox" id="sw-het-diff" checked onchange="updateBiofilmMultiphysicsInspector()"> M3: Curli/Charge D_eff</label>
+        <label><input type="checkbox" id="sw-bioelec-src" checked onchange="updateBiofilmMultiphysicsInspector()"> M3: Bioelectronic S_i</label>
+        <label><input type="checkbox" id="sw-droop-quota" checked onchange="updateBiofilmMultiphysicsInspector()"> M4: Droop Quota Q</label>
         <label><input type="checkbox" id="sw-qs-ev" checked onchange="updateBiofilmMultiphysicsInspector()"> M4: Stress PSM/EV</label>
         <label><input type="checkbox" id="sw-ek-ahl" checked onchange="updateBiofilmMultiphysicsInspector()"> M4: Electrokinetic AHL</label>
+        <label><input type="checkbox" id="sw-poly-crosstalk" checked onchange="updateBiofilmMultiphysicsInspector()"> M4: 3-Mode Crosstalk</label>
         <label><input type="checkbox" id="sw-fru-tol" checked onchange="updateBiofilmMultiphysicsInspector()"> M4: fruA/fruK Vanc-Tol</label>
-        <label><input type="checkbox" id="sw-emp-quench" onchange="updateBiofilmMultiphysicsInspector()"> M5: Quenched Imaging</label>
+        <label style="grid-column:span 2;"><input type="checkbox" id="sw-emp-quench" onchange="updateBiofilmMultiphysicsInspector()"> M5: Quenched Confocal Internalization Control</label>
       </div>
       <div class="metric-grid">
         <div class="metric-box">
@@ -1272,6 +1275,7 @@ function runSingleCellClassifier() {
   document.getElementById("clf-confusion-table").innerHTML = tblHtml;
 
   updateObservationBridge();
+  updateBiofilmMultiphysicsInspector();
   renderAllViews();
 }
 
@@ -2617,7 +2621,8 @@ function exportGatesAndAnalysisJSON() {
     gates: state.gates,
     gate_summaries: Object.fromEntries(
       Object.entries(state.gateSummaries).map(([k, v]) => [k, { count: v.count, pctParent: v.pctParent, pctTotal: v.pctTotal }])
-    )
+    ),
+    biofilm_multiphysics_m1_m5: state.biofilmMultiphysics || {}
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
@@ -2629,17 +2634,32 @@ function exportGatesAndAnalysisJSON() {
 function updateBiofilmMultiphysicsInspector() {
   const swPga = document.getElementById("sw-pga-swell")?.checked ?? true;
   const swHet = document.getElementById("sw-het-diff")?.checked ?? true;
+  const swSrc = document.getElementById("sw-bioelec-src")?.checked ?? true;
+  const swDrp = document.getElementById("sw-droop-quota")?.checked ?? true;
   const swEv  = document.getElementById("sw-qs-ev")?.checked ?? true;
   const swEk  = document.getElementById("sw-ek-ahl")?.checked ?? true;
+  const swCtk = document.getElementById("sw-poly-crosstalk")?.checked ?? true;
   const swFru = document.getElementById("sw-fru-tol")?.checked ?? true;
   const swEmp = document.getElementById("sw-emp-quench")?.checked ?? false;
   const topo  = document.getElementById("sel-qs-topology")?.value ?? "staphylococcus_agr_rnaiii_psm";
+  const task  = document.getElementById("sel-clf-target")?.value ?? "cell_stress_damage";
 
-  const swellTxt = swPga ? "8.6 kPa (Wrinkled)" : "0.0 kPa (Flat/Rigid)";
-  const dEffRatio = swHet ? "0.24 D0" : "0.78 D0 (Homog)";
-  const evFlux = swEv ? (topo === "staphylococcus_agr_rnaiii_psm" ? "4.9e6/mL" : "3.2e6/mL") : "1.2e6/mL (Basal)";
-  const fruPct = swFru ? "28.4%" : "6.0% (Fixed)";
-  const ahlShield = swEk ? "0.21x (Biofilm)" : "1.00x (Off)";
+  const swellKpa = swPga ? 8.58 : 0.0;
+  const swellTxt = swPga ? `${swellKpa.toFixed(1)} kPa (Wrinkled)` : "0.0 kPa (Flat/Rigid)";
+  const dEffVal  = swHet ? 0.24 : 0.78;
+  const dEffRatio = swHet ? `${dEffVal.toFixed(2)} D0` : "0.78 D0 (Homog)";
+
+  const droopMult = swDrp ? 1.0 : 0.86;
+  const ctkMult   = swCtk ? 0.78 : 1.0;
+  const srcMult   = swSrc ? 1.08 : 1.0;
+  const baseEv    = topo === "staphylococcus_agr_rnaiii_psm" ? 4.9 : (topo === "pseudomonas_pqse_rhlr" ? 3.6 : 3.1);
+  const evRateM   = swEv ? (baseEv * droopMult * ctkMult * srcMult) : 1.2;
+  const evFlux    = swEv ? `${evRateM.toFixed(1)}e6/mL` : "1.2e6/mL (Basal)";
+
+  const fruVal    = swFru ? (28.4 * droopMult) : 6.0;
+  const fruPct    = swFru ? `${fruVal.toFixed(1)}%` : "6.0% (Fixed)";
+  const shieldVal = swEk ? 0.21 : 1.00;
+  const ahlShield = swEk ? `${shieldVal.toFixed(2)}x (Biofilm)` : "1.00x (Off)";
 
   const elWrinkle = document.getElementById("val-m3-wrinkle");
   const elDeff    = document.getElementById("val-m3-m4-deff");
@@ -2648,17 +2668,49 @@ function updateBiofilmMultiphysicsInspector() {
   if (elWrinkle) elWrinkle.textContent = swellTxt;
   if (elDeff)    elDeff.textContent    = `${dEffRatio} | ${evFlux}`;
   if (elSubpop)  elSubpop.textContent  = `${fruPct} | ${ahlShield}`;
+
+  let m5Status = "synthetic_software_benchmark_only";
   if (elBanner) {
-    if (swEmp) {
+    if (task === "nanocarrier_uptake" && !swEmp) {
+      elBanner.textContent = "M5 Gate: Surface Association Warning (Quenched Confocal Control Required for Internalization)";
+      elBanner.style.background = "#fef3c7";
+      elBanner.style.color = "#92400e";
+      m5Status = "surface_association_only_warning";
+    } else if (swEmp) {
       elBanner.textContent = "M5 Gate: Quenched Control Active | Data Provenance Still Synthetic (External Solvers Uncoupled)";
       elBanner.style.background = "#e0f2fe";
       elBanner.style.color = "#0369a1";
+      m5Status = "quenched_control_active_synthetic_provenance";
     } else {
-      elBanner.textContent = "M5 Gate: Synthetic Software Benchmark Only (Surface vs Internalization Unverified)";
+      elBanner.textContent = "M5 Gate: Synthetic Software Benchmark Only (External OpenFOAM/PHREEQC Uncoupled)";
       elBanner.style.background = "#fef3c7";
       elBanner.style.color = "#92400e";
     }
   }
+
+  state.biofilmMultiphysics = {
+    qs_topology: topo,
+    switches: {
+      enable_pga_swelling_mechanics: swPga,
+      enable_heterogeneous_matrix_diffusion: swHet,
+      enable_localized_bioelectronic_delivery: swSrc,
+      enable_droop_intracellular_quota: swDrp,
+      enable_nutrient_stress_qs_ev: swEv,
+      enable_electrokinetic_ahl_degradation: swEk,
+      enable_polymicrobial_qs_crosstalk: swCtk,
+      enable_subpopulation_heterogeneity: swFru,
+      internalization_imaging_verified: swEmp
+    },
+    metrics: {
+      swelling_pressure_kpa: swellKpa,
+      relative_diffusivity_d_eff_d0: dEffVal,
+      ev_release_rate_e6_per_ml_h: Number(evRateM.toFixed(2)),
+      fructose_tolerant_subpop_pct: Number(fruVal.toFixed(2)),
+      biofilm_ahl_transmission_factor: shieldVal,
+      m5_claim_status: m5Status,
+      integrated_into_existing_openfoam_phreeqc_solvers: false
+    }
+  };
 }
 
 function exportClassifiedCSV() {
