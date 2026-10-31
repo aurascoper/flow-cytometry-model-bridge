@@ -80,6 +80,7 @@ const VALID_ORGANISM_STRAINS = (
     :Staphylococcus_aureus_USA300,
     :Escherichia_coli_UPEC,
     :Pseudomonas_aeruginosa_PAO1,
+    :Pseudomonas_aeruginosa_PA14,
     :polymicrobial_consortium,
     :unassigned_synthetic,
 )

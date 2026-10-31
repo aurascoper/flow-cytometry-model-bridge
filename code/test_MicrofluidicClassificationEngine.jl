@@ -573,6 +573,58 @@ using .MicrofluidicClassificationEngine
         @test_throws ArgumentError CoreMultishellSpec(epistemic_status=:observed)
         @test_throws ArgumentError CoreMultishellSpec(radii_um=[0.8, 0.5, 1.0])
 
+        # 5C. Ghosh2010_B12_PEGMA_315nm Public-Record Instance
+        ghosh_b12 = Ghosh2010_B12_PEGMA_315nm()
+        @test ghosh_b12.radii_um == [0.080, 0.125, 0.1575]
+        @test ghosh_b12.material_names == ["Fe3O4_core", "PEGMA_intermediate_shell", "B12_targeting_corona"]
+        @test ghosh_b12.partition_coefficients == [3.2, 1.5, 1.0]
+        @test ghosh_b12.track == :track1_nanobio
+        @test ghosh_b12.epistemic_status == :predicted
+        b12_sol = solve_core_multishell_rd(ghosh_b12; times_s=[0.0, 5.0, 10.0], n_radial_nodes=24)
+        @test length(b12_sol.snapshots) == 3
+        @test b12_sol.snapshots[1].cumulative_release_fraction == 0.0
+        @test b12_sol.snapshots[3].cumulative_release_fraction > b12_sol.snapshots[2].cumulative_release_fraction
+
+        # 5D. GhoshPatent_Cisplatin_DoubleShell_191nm Public-Record Instance
+        ghosh_cis = GhoshPatent_Cisplatin_DoubleShell_191nm()
+        @test ghosh_cis.radii_um == [0.045, 0.075, 0.0955]
+        @test ghosh_cis.material_names == ["Cisplatin_depot_core", "PLGA_diffusion_barrier_shell", "PEG_stealth_outer_shell"]
+        @test ghosh_cis.partition_coefficients == [4.5, 1.8, 1.0]
+        @test ghosh_cis.track == :track1_nanobio
+        @test ghosh_cis.epistemic_status == :predicted
+        cis_sol = solve_core_multishell_rd(ghosh_cis; times_s=[0.0, 5.0, 10.0], n_radial_nodes=24)
+        @test length(cis_sol.snapshots) == 3
+        @test cis_sol.snapshots[3].cumulative_release_fraction > 0.0
+
+        # 5E. fit_core_multishell_release_curve Parameter Recovery and Goodness-of-Fit
+        fit_times = collect(0.0:2.0:16.0)
+        true_b12_sol = solve_core_multishell_rd(ghosh_b12; times_s=fit_times, n_radial_nodes=24)
+        synth_release = [s.cumulative_release_fraction for s in true_b12_sol.snapshots]
+        fit_res = fit_core_multishell_release_curve(fit_times, synth_release; base_spec=ghosh_b12, n_radial_nodes=24)
+        @test fit_res.r_squared > 0.98
+        @test fit_res.rmse < 0.05
+        @test isapprox(fit_res.fitted_permeability_um_s, ghosh_b12.membrane_permeability_um_s; rtol=0.25)
+        @test fit_res.epistemic_status == :predicted
+        @test_throws ArgumentError fit_core_multishell_release_curve([1.0, 2.0], [0.1])
+        @test_throws ArgumentError fit_core_multishell_release_curve([2.0, 1.0], [0.1, 0.2])
+
+        # 5F. simulate_pulsed_duty_cycle_release (Field-Gated vs Thermal-Lag Dynamics)
+        pulsed = simulate_pulsed_duty_cycle_release(ghosh_b12; total_time_s=30.0, period_s=10.0, duty_cycle=0.25, active_permeability_multiplier=15.0, thermal_relaxation_time_s=1.5, n_radial_nodes=24, n_output_points=31)
+        @test length(pulsed.times_s) == 31
+        @test pulsed.epistemic_status == :predicted
+        @test pulsed.epistemic_label == "MODEL PREDICTION - illustrative parameters - no lab data"
+        # Invariant 1: Step field achieves higher on-phase release concentration selectivity than lagged thermal dissipation
+        @test pulsed.field_on_release_fraction_step >= pulsed.field_on_release_fraction_thermal
+        # Invariant 2: Thermal leakback fraction is non-negative
+        @test pulsed.thermal_leakback_fraction >= 0.0
+        # Invariant 3: Cumulative release is strictly monotonic
+        for k in 2:length(pulsed.times_s)
+            @test pulsed.field_gated_release_fraction[k] >= pulsed.field_gated_release_fraction[k - 1]
+            @test pulsed.thermal_lag_release_fraction[k] >= pulsed.thermal_lag_release_fraction[k - 1]
+        end
+        # Invariant 4: Peak thermal permeability lags behind step peak
+        @test maximum(pulsed.field_gated_permeability_um_s) >= maximum(pulsed.thermal_lag_permeability_um_s)
+
         # 5B. Jack Track 3 Interface-Resolved Emulsion Droplet Dynamics (t/tau_eta = 1..15)
         em_spec = EmulsionDropletSpec(
             droplet_radius_um = 10.0,
@@ -1282,27 +1334,136 @@ using .MicrofluidicClassificationEngine
     #     Validation Ladder (G0..G5), Multivariate Mahalanobis OOD, and Stratified Gates
     # =======================================================================
     @testset "Milestone M6.5: Controlled ablation matrix R0-R5, ValidationLadderReport G0-G5, multivariate Mahalanobis OOD, and stratified gates" begin
-        # 1. Controlled ablation matrix R0..R5, all 10 pairwise combinations R_ij, and R_full
+
+        # -------------------------------------------------------------------
+        # 1. Controlled ablation matrix: all 17 configurations evaluated (Knock-in mode)
+        # -------------------------------------------------------------------
         ablation = run_biofilm_ablation_matrix()
         @test ablation.n_configurations_evaluated == 17 # R0 + 5 single + 10 pairwise + R_full
         @test haskey(ablation.runs, :R0)
         @test haskey(ablation.runs, :R_full)
+
+        # 5 individual knock-in configurations
         for i in 1:5
             @test haskey(ablation.runs, Symbol("R$i"))
             @test haskey(ablation.main_effects, Symbol("R$i"))
             @test haskey(ablation.first_order_sensitivity_indices, Symbol("R$i"))
+            @test haskey(ablation.total_order_sensitivity_indices, Symbol("R$i"))
         end
-        @test length(ablation.pairwise_interactions) == 10
-        # R1 (swelling mechanics) increases wrinkling index over R0 (0.0)
-        @test ablation.runs[:R0].wrinkling_index == 0.0
-        @test ablation.runs[:R1].wrinkling_index > 0.0
-        # R2 (heterogeneous matrix diffusion) reduces relative diffusivity compared to homogeneous R0
-        @test ablation.runs[:R2].relative_diffusivity < ablation.runs[:R0].relative_diffusivity
-        # R5 (electrokinetic AHL degradation + crosstalk) reduces final autoinducer level compared to R0
-        @test ablation.runs[:R5].final_autoinducer_um < ablation.runs[:R0].final_autoinducer_um
 
-        # 2. Multivariate Mahalanobis distance and covariance Frobenius shift catch correlation-flipped OOD
-        #    even when marginal means and variances are nearly unchanged
+        # 10 pairwise interaction configurations (C(5,2) = 10)
+        pairwise_keys = [
+            :R12, :R13, :R14, :R15,
+            :R23, :R24, :R25,
+            :R34, :R35,
+            :R45
+        ]
+        @test length(pairwise_keys) == 10
+        @test length(ablation.pairwise_interactions) == 10
+        @test length(ablation.pairwise_sensitivity_indices) == 10
+        for k in pairwise_keys
+            @test haskey(ablation.runs, k)
+        end
+
+        # Verify physical output observables across all 17 configurations
+        for (cfg_name, cfg_res) in ablation.runs
+            @test isfinite(cfg_res.wrinkling_index) && cfg_res.wrinkling_index >= 0.0
+            @test isfinite(cfg_res.relative_diffusivity) && (0.0 <= cfg_res.relative_diffusivity <= 1.0)
+            @test isfinite(cfg_res.final_autoinducer_um) && cfg_res.final_autoinducer_um >= 0.0
+            @test isfinite(cfg_res.final_ev_particles_per_ml) && cfg_res.final_ev_particles_per_ml >= 0.0
+            @test isfinite(cfg_res.final_tolerant_fraction) && (0.0 <= cfg_res.final_tolerant_fraction <= 1.0)
+            @test isfinite(cfg_res.fcm_intact_fraction) && (0.0 <= cfg_res.fcm_intact_fraction <= 1.0)
+            @test isfinite(cfg_res.composite_response) && cfg_res.composite_response > 0.0
+        end
+
+        # Hypothesis-specific physical responses
+        # R0: homogeneous matrix, no PGA swelling
+        @test ablation.runs[:R0].wrinkling_index == 0.0
+        # R1: PGA swelling induces wrinkling instability
+        @test ablation.runs[:R1].wrinkling_index > 0.0
+        # R2: curli/matrix tortuosity reduces probe diffusivity vs homogeneous R0
+        @test ablation.runs[:R2].relative_diffusivity < ablation.runs[:R0].relative_diffusivity
+        # R4: nutrient/oxidative stress EV biogenesis maintains/increases EV particles
+        @test ablation.runs[:R4].final_ev_particles_per_ml >= ablation.runs[:R0].final_ev_particles_per_ml
+        # R5: electrokinetic ROS/AHL degradation reduces final autoinducer vs R0
+        @test ablation.runs[:R5].final_autoinducer_um < ablation.runs[:R0].final_autoinducer_um
+        # R_full: combined mechanisms active
+        @test ablation.runs[:R_full].wrinkling_index > 0.0
+        @test isfinite(ablation.runs[:R_full].composite_response)
+
+        # -------------------------------------------------------------------
+        # 2. Main effect and pairwise epistatic interaction effect estimators
+        # -------------------------------------------------------------------
+        y0 = ablation.runs[:R0].composite_response
+
+        # Main effect definition: Delta_i = Y_i - Y_0
+        for i in 1:5
+            ri = Symbol("R$i")
+            expected_delta = ablation.runs[ri].composite_response - y0
+            @test isapprox(ablation.main_effects[ri], expected_delta; atol=1e-12)
+        end
+
+        # Pairwise interaction effect definition: Delta_ij = Y_ij - Y_i - Y_j + Y_0
+        for i in 1:4, j in (i + 1):5
+            ri = Symbol("R$i")
+            rj = Symbol("R$j")
+            rij = Symbol("R$(i)$(j)")
+            pair_key = (ri, rj)
+            @test haskey(ablation.pairwise_interactions, pair_key)
+            expected_interaction = ablation.runs[rij].composite_response -
+                ablation.runs[ri].composite_response -
+                ablation.runs[rj].composite_response + y0
+            @test isapprox(ablation.pairwise_interactions[pair_key], expected_interaction; atol=1e-12)
+        end
+
+        # First-order sensitivity indices: S_i in [0, 1] and sum(S_i) <= 1.0
+        sum_sens = 0.0
+        for i in 1:5
+            ri = Symbol("R$i")
+            s_i = ablation.first_order_sensitivity_indices[ri]
+            s_ti = ablation.total_order_sensitivity_indices[ri]
+            @test 0.0 <= s_i <= 1.0
+            @test 0.0 <= s_ti <= 1.0
+            @test s_ti >= s_i # Total order sensitivity must be >= first order
+            sum_sens += s_i
+        end
+        @test sum_sens <= 1.0 + 1e-12
+
+        # -------------------------------------------------------------------
+        # 3. Knock-out mode ablation matrix: 17 configurations
+        # -------------------------------------------------------------------
+        ablation_ko = run_biofilm_ablation_matrix(mode=:knock_out)
+        @test ablation_ko.n_configurations_evaluated == 17
+        @test haskey(ablation_ko.runs, :R0)
+        @test haskey(ablation_ko.runs, :R_null)
+        for i in 1:5
+            @test haskey(ablation_ko.runs, Symbol("R$i"))
+            @test haskey(ablation_ko.main_effects, Symbol("R$i"))
+            @test haskey(ablation_ko.first_order_sensitivity_indices, Symbol("R$i"))
+            @test haskey(ablation_ko.total_order_sensitivity_indices, Symbol("R$i"))
+            @test ablation_ko.total_order_sensitivity_indices[Symbol("R$i")] >= ablation_ko.first_order_sensitivity_indices[Symbol("R$i")]
+        end
+        y0_ko = ablation_ko.runs[:R0].composite_response
+        for i in 1:5
+            ri = Symbol("R$i")
+            expected_loss = y0_ko - ablation_ko.runs[ri].composite_response
+            @test isapprox(ablation_ko.main_effects[ri], expected_loss; atol=1e-12)
+        end
+        for i in 1:4, j in (i + 1):5
+            ri = Symbol("R$i")
+            rj = Symbol("R$j")
+            rij = Symbol("R$(i)$(j)")
+            pair_key = (ri, rj)
+            @test haskey(ablation_ko.pairwise_interactions, pair_key)
+            expected_ko_interaction = ablation_ko.runs[ri].composite_response +
+                ablation_ko.runs[rj].composite_response -
+                ablation_ko.runs[rij].composite_response - y0_ko
+            @test isapprox(ablation_ko.pairwise_interactions[pair_key], expected_ko_interaction; atol=1e-12)
+        end
+
+        # -------------------------------------------------------------------
+        # 4. Multivariate Mahalanobis distance & covariance Frobenius shift
+        # -------------------------------------------------------------------
         rng_mv = MersenneTwister(20261031)
         n_tr = 120
         z1 = randn(rng_mv, n_tr)
@@ -1310,13 +1471,13 @@ using .MicrofluidicClassificationEngine
         X_corr_tr = hcat(z1, z2)
 
         e1 = randn(rng_mv, 60)
-        e2 = -0.92 .* e1 .+ 0.39 .* randn(rng_mv, 60) # correlation flipped (-0.92) in evaluation!
+        e2 = -0.92 .* e1 .+ 0.39 .* randn(rng_mv, 60) # correlation flipped (-0.92) in evaluation
         X_corr_ev = hcat(e1, e2)
 
         shift_mv = detect_feature_domain_shift(
             X_corr_tr, X_corr_ev;
             feature_names = ["f_corr_1", "f_corr_2"],
-            psi_threshold = 0.50, # high univariate threshold so univariate PSI/Z do not trigger
+            psi_threshold = 0.50,
             z_threshold = 2.5,
             covariance_shift_threshold = 0.80,
             ood_fraction_threshold = 0.15
@@ -1327,8 +1488,7 @@ using .MicrofluidicClassificationEngine
         @test shift_mv.shifted
         @test shift_mv.recommended_abstention_policy in (:abstain_and_recalibrate, :elevated_deferral_threshold)
 
-        # High-dimensional d >> n regime (d = 40, n_tr = 12, n_ev = 6): adaptive Ledoit-Wolf shrinkage keeps
-        # sample covariance well-conditioned and detects OOD shift without false in-distribution inflation
+        # High-dimensional d >> n regime (d = 40, n_tr = 12, n_ev = 6)
         X_hd_tr = randn(rng_mv, 12, 40)
         X_hd_ev_in = randn(rng_mv, 6, 40)
         X_hd_ev_ood = randn(rng_mv, 6, 40) .+ 3.5
@@ -1345,7 +1505,9 @@ using .MicrofluidicClassificationEngine
         @test shift_hd_ood.ood_event_fraction > 0.50
         @test shift_hd_ood.shifted
 
-        # 3. Stratified per-group ECE, minority-class recall, and biological replicate gates
+        # -------------------------------------------------------------------
+        # 5. Stratified classifier empirical audit & OOD blocking
+        # -------------------------------------------------------------------
         chip_tr = generate_synthetic_nanobio_fcs_dataset(
             n_events=180, sample_id="S-TR", chip_id="CHIP-TR", run_id="RUN-TR", biological_replicate="REP-1", seed=601)
         chip_ev = generate_synthetic_nanobio_fcs_dataset(
@@ -1372,7 +1534,6 @@ using .MicrofluidicClassificationEngine
         @test 0.0 <= rep_m6.min_class_recall <= 1.0
         @test 0.0 <= rep_m6.min_group_accuracy <= rep_m6.accepted_accuracy
 
-        # Audit classifier empirical generalization fails when OOD fraction exceeds threshold
         emp_proto_stress = EmpiricalValidationProtocol(
             protocol_id = "EMP-STRESS-M6",
             track = :track1_nanobio,
@@ -1393,7 +1554,10 @@ using .MicrofluidicClassificationEngine
         @test audit_with_mv_shift.recommended_decision == :abstain_or_defer_domain_shift
         @test !isempty(audit_with_mv_shift.blocking_reasons)
 
-        # 4. End-to-end 6-gate Validation Ladder (G0..G5)
+        # -------------------------------------------------------------------
+        # 6. Validation Ladder (G0..G5) Parameter Pass-Through & Fail Modes
+        # -------------------------------------------------------------------
+        # 6.1 Baseline synthetic evaluation: G5 strictly false
         ladder_default = evaluate_validation_ladder()
         @test ladder_default.gate_passed[:G0_dimensional_provenance]
         @test ladder_default.gate_passed[:G1_mesh_conservation_cfl]
@@ -1406,15 +1570,610 @@ using .MicrofluidicClassificationEngine
         @test !ladder_default.empirical_generalization_established
         @test ladder_default.claim_boundary == :synthetic_numerical_verification_only
 
+        # 6.2 Clean empirical pass with parameter pass-through
         ladder_emp = evaluate_validation_ladder(
             empirical_protocol = emp_proto_stress,
             heldout_run_accuracy = 0.91,
-            feature_psi_drift = 0.04
+            feature_psi_drift = 0.04,
+            feature_z_shift = 0.20,
+            ood_fraction = 0.05,
+            minority_class_recall = 0.85,
+            replicate_min_accuracy = 0.82
         )
         @test ladder_emp.numerical_verification_complete
         @test ladder_emp.empirical_generalization_established
+        @test ladder_emp.gate_passed[:G5_empirical_generalization_gate]
         @test ladder_emp.highest_passed_gate == :G5_empirical_generalization_gate
         @test ladder_emp.claim_boundary == :empirical_generalization_verified
+
+        # 6.3 OOD domain shift fail mode under parameter pass-through (ood_fraction > 0.15)
+        ladder_ood_fail = evaluate_validation_ladder(
+            empirical_protocol = emp_proto_stress,
+            heldout_run_accuracy = 0.91,
+            ood_fraction = 0.25,
+            max_allowed_ood_fraction = 0.15
+        )
+        @test !ladder_ood_fail.gate_passed[:G5_empirical_generalization_gate]
+        @test !ladder_ood_fail.empirical_generalization_established
+        @test ladder_ood_fail.highest_passed_gate == :G4_regulatory_graph_quota_audit
+        @test ladder_ood_fail.claim_boundary == :synthetic_numerical_verification_only
+
+        # 6.4 Minority class recall failure under parameter pass-through (recall < 0.75)
+        ladder_min_fail = evaluate_validation_ladder(
+            empirical_protocol = emp_proto_stress,
+            heldout_run_accuracy = 0.91,
+            minority_class_recall = 0.60,
+            min_minority_class_recall = 0.75
+        )
+        @test !ladder_min_fail.gate_passed[:G5_empirical_generalization_gate]
+        @test !ladder_min_fail.empirical_generalization_established
+        @test ladder_min_fail.highest_passed_gate == :G4_regulatory_graph_quota_audit
+
+        # 6.5 Biological replicate stratification failure (replicate accuracy < 0.75)
+        ladder_rep_fail = evaluate_validation_ladder(
+            empirical_protocol = emp_proto_stress,
+            heldout_run_accuracy = 0.91,
+            replicate_min_accuracy = 0.65,
+            min_replicate_accuracy = 0.75
+        )
+        @test !ladder_rep_fail.gate_passed[:G5_empirical_generalization_gate]
+        @test !ladder_rep_fail.empirical_generalization_established
+        @test ladder_rep_fail.highest_passed_gate == :G4_regulatory_graph_quota_audit
+
+        # 6.6 Nanocarrier uptake without internalization imaging fails Gate G5
+        proto_uptake_no_img = EmpiricalValidationProtocol(
+            protocol_id = "EMP-UPTAKE-NOIMG",
+            track = :track1_nanobio,
+            data_provenance = :deidentified_experimental_fcs,
+            independent_reference_labels = true,
+            counting_beads_verified = true,
+            internalization_imaging_verified = false,
+            n_independent_runs = 3,
+            n_heldout_runs = 1
+        )
+        ladder_uptake_no_img = evaluate_validation_ladder(
+            empirical_protocol = proto_uptake_no_img,
+            target_task = :nanocarrier_uptake,
+            heldout_run_accuracy = 0.92
+        )
+        @test !ladder_uptake_no_img.gate_passed[:G5_empirical_generalization_gate]
+        @test !ladder_uptake_no_img.empirical_generalization_established
+
+        # 6.7 Nanocarrier uptake with internalization imaging passes Gate G5
+        proto_uptake_img = EmpiricalValidationProtocol(
+            protocol_id = "EMP-UPTAKE-IMG",
+            track = :track1_nanobio,
+            data_provenance = :deidentified_experimental_fcs,
+            independent_reference_labels = true,
+            counting_beads_verified = true,
+            internalization_imaging_verified = true,
+            n_independent_runs = 3,
+            n_heldout_runs = 1
+        )
+        ladder_uptake_img = evaluate_validation_ladder(
+            empirical_protocol = proto_uptake_img,
+            target_task = :nanocarrier_uptake,
+            heldout_run_accuracy = 0.92
+        )
+        @test ladder_uptake_img.gate_passed[:G5_empirical_generalization_gate]
+        @test ladder_uptake_img.empirical_generalization_established
+
+        # -------------------------------------------------------------------
+        # 7. Formal 5-Tier Status Flags for Gates G0 through G5 (Control 6)
+        # -------------------------------------------------------------------
+        # Synthetic default evaluation: experimentally_calibrated & empirically_validated MUST be false
+        @test hasfield(typeof(ladder_default), :gate_status_flags)
+        for g in VALID_VALIDATION_LADDER_GATES
+            @test haskey(ladder_default.gate_status_flags, g)
+            st = ladder_default.gate_status_flags[g]
+            @test st.implemented == true
+            @test st.software_verified == true
+            @test st.numerically_benchmarked == true
+            @test st.experimentally_calibrated == false
+            @test st.empirically_validated == false
+        end
+
+        # Test property accessors
+        @test length(ladder_default.gate_status) == 6
+        @test length(ladder_default.gate_status_5tier) == 6
+        @test ladder_default.implemented == true
+        @test ladder_default.software_verified == true
+        @test ladder_default.numerically_benchmarked == true
+        @test ladder_default.experimentally_calibrated == false
+        @test ladder_default.empirically_validated == false
+
+        # Empirical evaluation: G5 transitions to experimentally_calibrated=true and empirically_validated=true
+        @test haskey(ladder_emp.gate_status_flags, :G5_empirical_generalization_gate)
+        g5_st = ladder_emp.gate_status_flags[:G5_empirical_generalization_gate]
+        @test g5_st.implemented == true
+        @test g5_st.software_verified == true
+        @test g5_st.numerically_benchmarked == true
+        @test g5_st.experimentally_calibrated == true
+        @test g5_st.empirically_validated == true
+        @test ladder_emp.empirically_validated == true
+
+        # Failed empirical run (OOD fail) has empirically_validated = false
+        @test ladder_ood_fail.gate_status_flags[:G5_empirical_generalization_gate].empirically_validated == false
+    end
+
+    # -----------------------------------------------------------------------
+    # 13. Milestone M2 (R3.5): Microfluidic Experimental Characterization Contracts & Control 3
+    # -----------------------------------------------------------------------
+    @testset "Milestone M2: Microfluidic characterization contracts (tapered constriction, developing flow, serpentine focusing)" begin
+        # 1. HydrogelBiofilmShearModulusContract
+        shear_ctr = evaluate_hydrogel_shear_modulus()
+        @test shear_ctr.contract_verified
+        @test shear_ctr.constriction_ratio ≈ 50.0 / 15.0 atol=1e-6
+        @test shear_ctr.apparent_strain ≈ 1.0 / 3.0 atol=1e-4
+        @test shear_ctr.taylor_deformation_parameter ≈ 1.0 / 3.0 atol=1e-4
+        @test shear_ctr.strain_hardening_factor > shear_ctr.apparent_strain
+        @test shear_ctr.transit_shear_strain > 0.0
+        @test shear_ctr.throat_reynolds_number < 10.0
+        @test 50.0 < shear_ctr.shear_modulus_pa < 500.0 # Physiological soft hydrogel / biofilm range
+
+        # Linear elastic limit (beta = 0.0)
+        shear_linear = evaluate_hydrogel_shear_modulus(strain_hardening_coeff=0.0)
+        @test shear_linear.strain_hardening_factor ≈ shear_linear.apparent_strain atol=1e-9
+        @test shear_linear.shear_modulus_pa ≈ shear_linear.applied_pressure_drop_pa / (shear_linear.transit_shear_strain * shear_linear.apparent_strain) atol=1e-6
+
+        # Mechanistic status tagging for Contract 1
+        shear_tags = categorize_mechanistic_quantities(shear_ctr)
+        @test :shear_modulus_pa in shear_tags[:calibrated_constitutive_model]
+        @test :entry_width_m in shear_tags[:experimental_contract]
+        @test :applied_pressure_drop_pa in shear_tags[:experimental_contract]
+        @test :taylor_deformation_parameter in shear_tags[:analytical_solution]
+        @test :throat_wall_shear_rate_s in shear_tags[:analytical_solution]
+        @test :transit_shear_strain in shear_tags[:numerical_prediction]
+        @test :throat_reynolds_number in shear_tags[:numerical_prediction]
+
+        # Contract 1 validation errors
+        @test_throws ArgumentError evaluate_hydrogel_shear_modulus(entry_width_m=10.0e-6, throat_width_m=20.0e-6)
+        @test_throws ArgumentError evaluate_hydrogel_shear_modulus(applied_pressure_drop_pa=-500.0)
+
+        # 2. DevelopingFlowShearContract and Shah & London (1978) series
+        # Circular limit: f * Re = 64
+        circ_ctr = evaluate_developing_flow_shear(channel_geometry=:circular, width_m=100.0e-6, height_m=100.0e-6)
+        @test circ_ctr.contract_verified
+        @test circ_ctr.poiseuille_friction_factor_re ≈ 64.0 atol=1e-9
+        @test circ_ctr.hydrodynamic_entrance_length_m ≈ 0.056 * circ_ctr.reynolds_number * circ_ctr.hydraulic_diameter_m atol=1e-9
+
+        # Square limit: f * Re = 56.91
+        sq_ctr = evaluate_developing_flow_shear(channel_geometry=:square, width_m=100.0e-6, height_m=100.0e-6)
+        @test sq_ctr.contract_verified
+        @test sq_ctr.aspect_ratio ≈ 1.0 atol=1e-9
+        @test 56.91 <= sq_ctr.poiseuille_friction_factor_re <= 56.92
+        @test sq_ctr.poiseuille_friction_factor_re ≈ shah_london_friction_factor_re(1.0) atol=1e-9
+
+        # Rectangular ducts across aspect ratios alpha in [0, 1]
+        f_re_plates = shah_london_friction_factor_re(0.0)
+        @test f_re_plates ≈ 96.0 atol=1e-9
+
+        # Shah & London monotonicity across alpha: 0.0 -> 0.2 -> 0.5 -> 0.8 -> 1.0
+        alphas = [0.0, 0.2, 0.5, 0.8, 1.0]
+        f_res = [shah_london_friction_factor_re(a) for a in alphas]
+        for i in 1:(length(f_res) - 1)
+            @test f_res[i] > f_res[i + 1]
+        end
+        @test_throws ArgumentError shah_london_friction_factor_re(-0.1)
+        @test_throws ArgumentError shah_london_friction_factor_re(1.1)
+
+        # Developing wall shear stress profile tau_w(x)
+        rect_ctr = evaluate_developing_flow_shear(channel_geometry=:rectangular, width_m=150.0e-6, height_m=50.0e-6)
+        @test rect_ctr.contract_verified
+        @test rect_ctr.aspect_ratio ≈ 50.0 / 150.0 atol=1e-6
+        @test rect_ctr.shear_monotonic_decay_verified
+        @test rect_ctr.peak_inlet_shear_pa > rect_ctr.fully_developed_wall_shear_pa
+        @test rect_ctr.developing_wall_shear_pa[end] ≈ rect_ctr.fully_developed_wall_shear_pa rtol=0.20
+
+        # Mechanistic status tagging for Contract 2
+        flow_tags = categorize_mechanistic_quantities(rect_ctr)
+        @test :poiseuille_friction_factor_re in flow_tags[:analytical_solution]
+        @test :hydrodynamic_entrance_length_m in flow_tags[:analytical_solution]
+        @test :developing_wall_shear_pa in flow_tags[:numerical_prediction]
+        @test :peak_inlet_shear_pa in flow_tags[:numerical_prediction]
+        @test :channel_geometry in flow_tags[:experimental_contract]
+        @test :channel_length_m in flow_tags[:experimental_contract]
+        @test :fluid_viscosity_pa_s in flow_tags[:calibrated_constitutive_model]
+
+        # 3. SerpentineViscoelasticFocusingContract
+        visco_ctr = evaluate_serpentine_viscoelastic_focusing()
+        @test visco_ctr.contract_verified
+        @test visco_ctr.hydraulic_diameter_m ≈ 50.0e-6 atol=1e-9
+        @test visco_ctr.dean_number ≈ visco_ctr.reynolds_number * sqrt(visco_ctr.hydraulic_diameter_m / (2.0 * visco_ctr.radius_of_curvature_m)) atol=1e-9
+        @test visco_ctr.weissenberg_number ≈ visco_ctr.relaxation_time_s * visco_ctr.characteristic_shear_rate_s atol=1e-9
+        @test visco_ctr.focusing_regime_parameter ≈ visco_ctr.weissenberg_number / sqrt(visco_ctr.dean_number) atol=1e-6
+        @test visco_ctr.focusing_regime_parameter >= 1.0
+        @test visco_ctr.single_line_focusing_predicted
+        @test visco_ctr.dean_drag_force_n > 0.0
+        @test visco_ctr.elastic_lift_force_n > 0.0
+        @test visco_ctr.force_ratio_fe_over_fd > 1.0 # Elastic lift dominates secondary Dean drag
+
+        # Sub-threshold regime (weak elasticity, Wi * De^(-1/2) < 1.0)
+        visco_sub = evaluate_serpentine_viscoelastic_focusing(relaxation_time_s=0.00005)
+        @test visco_sub.contract_verified
+        @test visco_sub.focusing_regime_parameter < 1.0
+        @test !visco_sub.single_line_focusing_predicted
+
+        # Mechanistic status tagging for Contract 3
+        visco_tags = categorize_mechanistic_quantities(visco_ctr)
+        @test :dean_number in visco_tags[:analytical_solution]
+        @test :weissenberg_number in visco_tags[:analytical_solution]
+        @test :focusing_regime_parameter in visco_tags[:analytical_solution]
+        @test :dean_drag_force_n in visco_tags[:numerical_prediction]
+        @test :elastic_lift_force_n in visco_tags[:numerical_prediction]
+        @test :force_ratio_fe_over_fd in visco_tags[:numerical_prediction]
+        @test :particle_diameter_m in visco_tags[:experimental_contract]
+        @test :radius_of_curvature_m in visco_tags[:experimental_contract]
+        @test :relaxation_time_s in visco_tags[:calibrated_constitutive_model]
+        @test :first_normal_stress_difference_pa in visco_tags[:calibrated_constitutive_model]
+
+        # 4. Extended Gate G3 in evaluate_validation_ladder
+        ladder = evaluate_validation_ladder()
+        @test ladder.gate_passed[:G3_constitutive_transport_verification]
+        @test occursin("G=", ladder.gate_summaries[:G3_constitutive_transport_verification])
+        @test occursin("fRe=", ladder.gate_summaries[:G3_constitutive_transport_verification])
+        @test occursin("Wi*De^(-0.5)=", ladder.gate_summaries[:G3_constitutive_transport_verification])
+    end
+
+    # =======================================================================
+    # 14. Milestone M3 (Requirements R4.1-R4.4): Species Regulatory Networks,
+    #     Chimera Rejection, Droop Mass Balance & Gate G4 Multi-Species Audit
+    # =======================================================================
+    @testset "Milestone M3 (R4.1-R4.4): Species Regulatory Networks, Chimera Rejection, Droop Mass Balance & Gate G4 Audit" begin
+        # 1. S. aureus USA300 monoculture regulatory network (R4.1)
+        g_sa_strain = build_species_regulatory_network(:Staphylococcus_aureus_USA300)
+        @test g_sa_strain.primary_species in (:staphylococcus_aureus, :Staphylococcus_aureus_USA300)
+        @test g_sa_strain.organism_strain == :Staphylococcus_aureus_USA300
+        @test !g_sa_strain.allow_cross_species_edges
+        @test length(g_sa_strain.nodes) >= 10
+        @test "RNAIII" in g_sa_strain.nodes
+        @test "alpha_PSM" in g_sa_strain.nodes
+        @test "AgrC_AgrA" in g_sa_strain.nodes
+        @test g_sa_strain.node_species["RNAIII"] == :Staphylococcus_aureus_USA300
+        @test g_sa_strain.node_species["alpha_PSM"] == :Staphylococcus_aureus_USA300
+        @test all(e -> e.organism_strain == :Staphylococcus_aureus_USA300, g_sa_strain.edges)
+        @test all(e -> !e.is_cross_species_bridge, g_sa_strain.edges)
+        @test all(e -> e.interaction_type == :intraspecies_regulation, g_sa_strain.edges)
+
+        # Audit S. aureus monoculture with valid parameters
+        sa_valid_params = BiofilmRegulatoryParams(
+            topology = QSRegulatoryTopology(topology_id=:staphylococcus_agr_rnaiii_psm, pqse_chaperone_coupling=0.0),
+            vancomycin_exposure_ug_ml = 5.0
+        )
+        sa_audit = validate_regulatory_network_applicability(g_sa_strain, sa_valid_params; requested_species=:Staphylococcus_aureus_USA300)
+        @test sa_audit.valid
+        @test sa_audit.species_separation_enforced
+        @test isempty(sa_audit.blocking_violations)
+        @test sa_audit.cross_species_edges_count == 0
+
+        # 2. P. aeruginosa PA14 monoculture regulatory network with PqsE-RhlR chaperone coupling (R4.1)
+        g_pa_strain = build_species_regulatory_network(:Pseudomonas_aeruginosa_PA14)
+        @test g_pa_strain.primary_species in (:pseudomonas_aeruginosa, :Pseudomonas_aeruginosa_PA14)
+        @test g_pa_strain.organism_strain == :Pseudomonas_aeruginosa_PA14
+        @test !g_pa_strain.allow_cross_species_edges
+        @test "PqsE_Chaperone" in g_pa_strain.nodes
+        @test "RhlR_Regulon" in g_pa_strain.nodes
+        @test "3OC12_HSL" in g_pa_strain.nodes
+        @test "Pyocyanin_HQNO_Effector" in g_pa_strain.nodes
+        @test g_pa_strain.node_species["PqsE_Chaperone"] == :Pseudomonas_aeruginosa_PA14
+        @test g_pa_strain.node_species["RhlR_Regulon"] == :Pseudomonas_aeruginosa_PA14
+
+        # Specific chaperone-allosteric edge verification
+        pqse_edge = only(filter(e -> e.source_node == "PqsE_Chaperone" && e.target_node == "RhlR_Regulon", g_pa_strain.edges))
+        @test pqse_edge.mechanism_class == :chaperone_allosteric
+        @test pqse_edge.sign == :activation
+        @test pqse_edge.strain_scope == "PA14"
+        @test pqse_edge.organism_strain == :Pseudomonas_aeruginosa_PA14
+        @test !pqse_edge.is_cross_species_bridge
+        @test pqse_edge.interaction_type == :intraspecies_regulation
+        @test pqse_edge.evidence_status == :observed
+
+        pa_valid_params = BiofilmRegulatoryParams(
+            topology = QSRegulatoryTopology(topology_id=:pseudomonas_pqse_rhlr, pqse_chaperone_coupling=0.80),
+            vancomycin_exposure_ug_ml = 0.0
+        )
+        pa_audit = validate_regulatory_network_applicability(g_pa_strain, pa_valid_params; requested_species=:Pseudomonas_aeruginosa_PA14)
+        @test pa_audit.valid
+        @test pa_audit.species_separation_enforced
+        @test isempty(pa_audit.blocking_violations)
+        @test pa_audit.cross_species_edges_count == 0
+
+        # 3. Negative Chimera test: structural rejection of cross-wiring and invalid parameterizations (R4.1, R4.2)
+        # 3a. Target-node Chimera rejection: foreign target nodes rejected in monoculture graphs
+        @test_throws ArgumentError begin
+            e_tgt_sa = RegulatoryInteractionEdge(
+                source_node = "AgrC_AgrA",
+                target_node = "PqsE_Chaperone",
+                species_scope = :staphylococcus_aureus,
+                citation = "Negative target-node test"
+            )
+            RegulatoryNetworkGraph(
+                graph_id = "CHIMERA-TARGET-SA",
+                primary_species = :staphylococcus_aureus,
+                nodes = ["AgrC_AgrA", "PqsE_Chaperone"],
+                edges = [e_tgt_sa],
+                allow_cross_species_edges = false
+            )
+        end
+        @test_throws ArgumentError begin
+            e_tgt_pa = RegulatoryInteractionEdge(
+                source_node = "LasI_LasR",
+                target_node = "alpha_PSM",
+                species_scope = :pseudomonas_aeruginosa,
+                citation = "Negative target-node test"
+            )
+            RegulatoryNetworkGraph(
+                graph_id = "CHIMERA-TARGET-PA",
+                primary_species = :pseudomonas_aeruginosa,
+                nodes = ["LasI_LasR", "alpha_PSM"],
+                edges = [e_tgt_pa],
+                allow_cross_species_edges = false
+            )
+        end
+
+        # 3b. Foreign nodes in monoculture node list rejected with ArgumentError
+        valid_sa_edge = only(filter(e -> e.source_node == "Extracellular_Nutrient_N", g_sa_strain.edges))
+        @test_throws ArgumentError RegulatoryNetworkGraph(
+            graph_id = "CHIMERA-NODELIST-SA",
+            primary_species = :staphylococcus_aureus,
+            nodes = ["Extracellular_Nutrient_N", "Intracellular_Quota_Q", "PqsE_Chaperone"],
+            edges = [valid_sa_edge],
+            allow_cross_species_edges = false
+        )
+        valid_pa_edge = only(filter(e -> e.source_node == "3OC12_HSL", g_pa_strain.edges))
+        @test_throws ArgumentError RegulatoryNetworkGraph(
+            graph_id = "CHIMERA-NODELIST-PA",
+            primary_species = :pseudomonas_aeruginosa,
+            nodes = ["Extracellular_Nutrient_N", "Intracellular_Quota_Q", "3OC12_HSL", "LasI_LasR", "AgrC_AgrA"],
+            edges = [valid_pa_edge],
+            allow_cross_species_edges = false
+        )
+
+        # 3c. Foreign node_species & applicability audit
+        @test_throws ArgumentError RegulatoryNetworkGraph(
+            graph_id = "CHIMERA-NODESPECIES-SA",
+            primary_species = :staphylococcus_aureus,
+            nodes = ["Extracellular_Nutrient_N", "Intracellular_Quota_Q"],
+            edges = [valid_sa_edge],
+            allow_cross_species_edges = false,
+            node_species = Dict(
+                "Extracellular_Nutrient_N" => :Staphylococcus_aureus_USA300,
+                "Intracellular_Quota_Q" => :Pseudomonas_aeruginosa_PA14
+            )
+        )
+        @test_throws ArgumentError RegulatoryNetworkGraph(
+            graph_id = "CHIMERA-NODESPECIES-PA",
+            primary_species = :pseudomonas_aeruginosa,
+            nodes = ["3OC12_HSL", "LasI_LasR"],
+            edges = [valid_pa_edge],
+            allow_cross_species_edges = false,
+            node_species = Dict(
+                "3OC12_HSL" => :Pseudomonas_aeruginosa_PA14,
+                "LasI_LasR" => :Staphylococcus_aureus_USA300
+            )
+        )
+
+        # 3d. Strain validation and biological consistency in RegulatoryInteractionEdge
+        @test_throws ArgumentError RegulatoryInteractionEdge(
+            source_node = "Extracellular_Nutrient_N",
+            target_node = "Intracellular_Quota_Q",
+            species_scope = :staphylococcus_aureus,
+            organism_strain = :Pseudomonas_aeruginosa_PA14,
+            citation = "Strain mismatch negative test"
+        )
+        @test_throws ArgumentError RegulatoryInteractionEdge(
+            source_node = "3OC12_HSL",
+            target_node = "LasI_LasR",
+            species_scope = :pseudomonas_aeruginosa,
+            organism_strain = :Staphylococcus_aureus_USA300,
+            citation = "Strain mismatch negative test"
+        )
+        @test_throws ArgumentError RegulatoryInteractionEdge(
+            source_node = "Extracellular_Nutrient_N",
+            target_node = "Intracellular_Quota_Q",
+            species_scope = :staphylococcus_aureus,
+            organism_strain = :completely_bogus_strain,
+            citation = "Invalid strain negative test"
+        )
+        @test_throws ArgumentError RegulatoryInteractionEdge(
+            source_node = "Extracellular_Nutrient_N",
+            target_node = "Intracellular_Quota_Q",
+            species_scope = :staphylococcus_aureus,
+            organism_strain = :polymicrobial_consortium,
+            citation = "Consortium strain in intraspecies edge negative test"
+        )
+
+        # Monoculture graph rejects foreign organism_strain parameter
+        @test_throws ArgumentError RegulatoryNetworkGraph(
+            graph_id = "CHIMERA-STRAIN-PARAM-SA",
+            primary_species = :staphylococcus_aureus,
+            nodes = ["Extracellular_Nutrient_N", "Intracellular_Quota_Q"],
+            edges = [valid_sa_edge],
+            allow_cross_species_edges = false,
+            organism_strain = :Pseudomonas_aeruginosa_PA14
+        )
+        @test_throws ArgumentError RegulatoryNetworkGraph(
+            graph_id = "CHIMERA-STRAIN-PARAM-PA",
+            primary_species = :pseudomonas_aeruginosa,
+            nodes = ["3OC12_HSL", "LasI_LasR"],
+            edges = [valid_pa_edge],
+            allow_cross_species_edges = false,
+            organism_strain = :Staphylococcus_aureus_USA300
+        )
+
+        # Attempting to wire PqsE chaperone coupling edge directly into S. aureus monoculture graph throws ArgumentError
+        @test_throws ArgumentError RegulatoryNetworkGraph(
+            graph_id = "CHIMERA-SA-PA-CHAPERONE",
+            primary_species = :staphylococcus_aureus,
+            nodes = ["Extracellular_Nutrient_N", "Intracellular_Quota_Q", "PqsE_Chaperone", "RhlR_Regulon"],
+            edges = [pqse_edge],
+            allow_cross_species_edges = false
+        )
+
+        # Attempting to wire S. aureus RNAIII edge directly into P. aeruginosa PA14 monoculture graph throws ArgumentError
+        rnaiii_edge = only(filter(e -> e.target_node == "RNAIII", g_sa_strain.edges))
+        @test_throws ArgumentError RegulatoryNetworkGraph(
+            graph_id = "CHIMERA-PA-SA-RNAIII",
+            primary_species = :pseudomonas_aeruginosa,
+            nodes = ["Extracellular_Nutrient_N", "Intracellular_Quota_Q", "AgrC_AgrA", "RNAIII"],
+            edges = [rnaiii_edge],
+            allow_cross_species_edges = false
+        )
+
+        # Untyped cross-species interaction throws ArgumentError at edge construction
+        @test_throws ArgumentError RegulatoryInteractionEdge(
+            source_node = "HQNO_Toxin",
+            target_node = "AgrC_AgrA",
+            species_scope = :staphylococcus_aureus,
+            signal_producer = :pseudomonas_aeruginosa,
+            receiving_species = :staphylococcus_aureus,
+            interaction_type = :intraspecies_regulation,
+            is_cross_species_bridge = false,
+            citation = "Illegal cross-talk without bridge typing"
+        )
+
+        # Monoculture graph attempting allow_cross_species_edges=true without polymicrobial consortium throws ArgumentError
+        @test_throws ArgumentError RegulatoryNetworkGraph(
+            graph_id = "INVALID-MONO-BRIDGE",
+            primary_species = :staphylococcus_aureus,
+            participating_species = [:staphylococcus_aureus],
+            nodes = g_sa_strain.nodes,
+            edges = g_sa_strain.edges,
+            allow_cross_species_edges = true
+        )
+
+        # Chimera parameter audit: foreign PA chaperone topology applied to S. aureus monoculture
+        chimera_coupling_params = BiofilmRegulatoryParams(
+            topology = QSRegulatoryTopology(topology_id=:pseudomonas_pqse_rhlr, pqse_chaperone_coupling=1.20),
+            vancomycin_exposure_ug_ml = 2.0
+        )
+        chimera_audit = validate_regulatory_network_applicability(g_sa_strain, chimera_coupling_params; requested_species=:staphylococcus_aureus)
+        @test !chimera_audit.valid
+        @test !chimera_audit.species_separation_enforced
+        @test "pseudomonas_topology_applied_to_staphylococcus_monoculture" in chimera_audit.blocking_violations
+        @test "pseudomonas_pqse_chaperone_coupling_nonzero_in_staphylococcus" in chimera_audit.blocking_violations
+
+        # Audit catches foreign nodes and foreign node_species in applicability audit
+        poly_as_sa_audit = validate_regulatory_network_applicability(
+            build_species_regulatory_network(:polymicrobial_consortium; include_polymicrobial_crosstalk=true),
+            BiofilmRegulatoryParams(topology=QSRegulatoryTopology(topology_id=:staphylococcus_agr_rnaiii_psm));
+            requested_species = :staphylococcus_aureus
+        )
+        @test !poly_as_sa_audit.valid
+        @test !poly_as_sa_audit.species_separation_enforced
+        @test any(v -> startswith(v, "foreign_pseudomonas_node_in_staphylococcus_graph"), poly_as_sa_audit.blocking_violations)
+        @test any(v -> startswith(v, "foreign_pseudomonas_node_species_in_staphylococcus_graph"), poly_as_sa_audit.blocking_violations)
+
+        poly_as_pa_audit = validate_regulatory_network_applicability(
+            build_species_regulatory_network(:polymicrobial_consortium; include_polymicrobial_crosstalk=true),
+            BiofilmRegulatoryParams(topology=QSRegulatoryTopology(topology_id=:pseudomonas_pqse_rhlr));
+            requested_species = :pseudomonas_aeruginosa
+        )
+        @test !poly_as_pa_audit.valid
+        @test !poly_as_pa_audit.species_separation_enforced
+        @test any(v -> startswith(v, "foreign_staphylococcus_node_in_pseudomonas_graph"), poly_as_pa_audit.blocking_violations)
+        @test any(v -> startswith(v, "foreign_staphylococcus_node_species_in_pseudomonas_graph"), poly_as_pa_audit.blocking_violations)
+
+        # 4. Polymicrobial regulatory bridge valid execution (R4.1, R4.2)
+        g_poly = build_species_regulatory_network(:polymicrobial_consortium; include_polymicrobial_crosstalk=true)
+        @test g_poly.primary_species in (:polymicrobial_co_culture, :polymicrobial_consortium)
+        @test g_poly.organism_strain == :polymicrobial_consortium
+        @test g_poly.allow_cross_species_edges
+        @test length(g_poly.participating_species) == 2
+        @test :staphylococcus_aureus in g_poly.participating_species
+        @test :pseudomonas_aeruginosa in g_poly.participating_species
+
+        # Verify bridge edges
+        bridge_edges = filter(e -> e.is_cross_species_bridge, g_poly.edges)
+        @test length(bridge_edges) >= 2
+        @test all(e -> e.interaction_type == :polymicrobial_cross_talk, bridge_edges)
+
+        hqno_cross = only(filter(e -> e.source_node == "Pyocyanin_HQNO_Effector" && e.target_node == "AgrC_AgrA", g_poly.edges))
+        @test hqno_cross.sign == :inhibition
+        @test hqno_cross.signal_producer == :pseudomonas_aeruginosa
+        @test hqno_cross.receiving_species == :staphylococcus_aureus
+        @test hqno_cross.is_cross_species_bridge
+        @test hqno_cross.interaction_type == :polymicrobial_cross_talk
+
+        poly_audit = validate_regulatory_network_applicability(g_poly, BiofilmRegulatoryParams(); requested_species=:polymicrobial_co_culture)
+        @test poly_audit.valid
+        @test poly_audit.species_separation_enforced
+        @test poly_audit.cross_species_edges_count >= 2
+
+        # 5. Droop intracellular nutrient quota mass balance and growth-dilution conservation (R4.2)
+        droop_model = DroopCellQuotaModel(
+            model_id = "DROOP-SA-USA300",
+            organism_strain = :Staphylococcus_aureus_USA300,
+            min_quota_mmol_gdw = 0.22,
+            max_quota_mmol_gdw = 1.25,
+            max_uptake_rate_mmol_gdw_h = 0.48,
+            half_saturation_mm = 0.75,
+            max_growth_rate_h = 0.36,
+            yield_biomass_per_quota = 1.0
+        )
+        @test droop_model.organism_strain == :Staphylococcus_aureus_USA300
+        @test droop_model.min_quota_mmol_gdw == 0.22
+        @test droop_model.max_growth_rate_h == 0.36
+
+        # Negative DroopCellQuotaModel tests
+        @test_throws ArgumentError DroopCellQuotaModel(min_quota_mmol_gdw=1.5, max_quota_mmol_gdw=1.0)
+        @test_throws ArgumentError DroopCellQuotaModel(organism_strain=:invalid_organism_strain)
+        @test_throws ArgumentError DroopCellQuotaModel(max_growth_rate_h=-0.1)
+
+        # Transient integration over 24 hours
+        t_span = collect(0.0:0.5:24.0)
+        sim_res = simulate_droop_quota_dynamics(
+            droop_model;
+            initial_nutrient_mm = 8.0,
+            initial_quota_mmol_gdw = 0.65,
+            initial_biomass_gdw_l = 0.35,
+            times_h = t_span,
+            dt_substep_h = 0.005
+        )
+        @test sim_res.mass_conserved
+        @test sim_res.quota_bounds_respected
+        @test sim_res.max_relative_conservation_error < 1e-12
+        @test sim_res.max_relative_conservation_error < 1e-13
+        # Inventory invariant: N(t) + Q(t)*X(t) == const to machine precision
+        inv_0 = sim_res.initial_inventory_mm
+        @test isapprox(sim_res.final_inventory_mm, inv_0; rtol=1e-13)
+        for inv_t in sim_res.total_nutrient_inventory_mm
+            @test abs(inv_t - inv_0) / inv_0 < 1e-12
+        end
+
+        # Dynamics behavior: nutrient consumed, biomass grows
+        @test sim_res.extracellular_nutrient_mm[end] < sim_res.extracellular_nutrient_mm[1]
+        @test sim_res.biomass_gdw_l[end] > sim_res.biomass_gdw_l[1]
+
+        # Growth dilution rate -mu(Q)*Q(t) is strictly <= 0 and uptake rate rho(S) is >= 0
+        @test length(sim_res.growth_dilution_rates) == length(t_span)
+        @test all(r -> r <= 0.0, sim_res.growth_dilution_rates)
+        @test all(r -> r >= 0.0, sim_res.uptake_rates)
+        @test all(r -> r >= 0.0, sim_res.growth_rates)
+
+        # Audit function audit_droop_mass_conservation verification
+        mass_audit = audit_droop_mass_conservation(
+            model = droop_model,
+            initial_nutrient_mm = 6.0,
+            initial_quota_mmol_gdw = 0.60,
+            initial_biomass_gdw_l = 0.40,
+            times_h = collect(0.0:1.0:16.0),
+            tolerance = 1e-12
+        )
+        @test mass_audit.mass_conserved
+        @test mass_audit.quota_bounds_respected
+        @test mass_audit.max_relative_conservation_error < 1e-12
+        @test length(mass_audit.growth_dilution_rates) == 17
+
+        # 6. Extended Gate G4 multi-species evaluation in ValidationLadderReport (R4.3)
+        ladder = evaluate_validation_ladder()
+        @test ladder.gate_passed[:G4_regulatory_graph_quota_audit]
+        g4_summary = ladder.gate_summaries[:G4_regulatory_graph_quota_audit]
+        @test occursin("SA=true", g4_summary)
+        @test occursin("PA14=true", g4_summary)
+        @test occursin("poly_bridge=true", g4_summary)
+        @test occursin("chimera_rejection=true", g4_summary)
+        @test occursin("droop_err=", g4_summary)
     end
 end
 

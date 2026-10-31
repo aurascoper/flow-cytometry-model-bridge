@@ -998,6 +998,24 @@ using .FlowCytometryObservationModel
         @test reg_cal_audit.all_parameters_calibrated
         @test reg_cal_audit.empirically_calibrated_for_target_organism
 
+        # Organism-matched registry for Pseudomonas_aeruginosa_PA14
+        p_pa14 = ParameterProvenanceEntry(
+            symbol = :pqse_coupling_pa14,
+            value = 0.5,
+            unit = "1",
+            si_exponents = (0, 0, 0, 0, 0, 0, 0),
+            physical_role = :dimensionless,
+            uncertainty_bounds = (0.0, 2.0),
+            organism_strain = :Pseudomonas_aeruginosa_PA14,
+            source_status = :literature_derived,
+            source_citation = "PqsE-RhlR allosteric chaperone coupling in P. aeruginosa PA14",
+            calibrated = true
+        )
+        reg_pa14 = ParameterProvenanceRegistry("TEST-REG-PA14", [p_pa14])
+        reg_pa14_audit = audit_parameter_provenance_registry(reg_pa14; target_organism=:Pseudomonas_aeruginosa_PA14, require_all_calibrated=true)
+        @test reg_pa14_audit.audit_passed
+        @test reg_pa14_audit.empirically_calibrated_for_target_organism
+
         # Edge cases: assumed/unassigned claiming calibrated=true, value outside bounds, duplicate symbols
         @test_throws ArgumentError ParameterProvenanceEntry(
             symbol = :bad_cal, value = 1.0, unit = "1", si_exponents = (0, 0, 0, 0, 0, 0, 0),

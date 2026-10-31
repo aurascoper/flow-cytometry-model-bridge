@@ -3019,6 +3019,9 @@ import ..FlowCytometryObservationModel: VALID_STAKEHOLDER_TRACKS, VALID_EPISTEMI
 
 export CoreMultishellSpec, CoreMultishellSnapshot, CoreMultishellSolution,
        solve_core_multishell_rd,
+       Ghosh2010_B12_PEGMA_315nm, GhoshPatent_Cisplatin_DoubleShell_191nm,
+       CoreMultishellFitResult, fit_core_multishell_release_curve,
+       PulsedDutyCycleComparison, simulate_pulsed_duty_cycle_release,
        EmulsionDropletSpec, EmulsionDropletSnapshot, EmulsionDropletSolution,
        solve_emulsion_interfacial_droplet
 
@@ -3031,6 +3034,8 @@ struct CoreMultishellSpec
     channel_flow_velocity_mm_s::Float64
     track::Symbol
     epistemic_status::Symbol
+    material_names::Vector{String}
+    partition_coefficients::Vector{Float64}
 
     function CoreMultishellSpec(;
             radii_um::AbstractVector{<:Real}=[0.35, 0.70, 1.00],
@@ -3040,7 +3045,9 @@ struct CoreMultishellSpec
             membrane_permeability_um_s::Real=0.08,
             channel_flow_velocity_mm_s::Real=15.0,
             track::Symbol=:track1_nanobio,
-            epistemic_status::Symbol=:predicted)
+            epistemic_status::Symbol=:predicted,
+            material_names::AbstractVector{<:AbstractString}=String[],
+            partition_coefficients::AbstractVector{<:Real}=Float64[])
         track == :track1_nanobio ||
             throw(ArgumentError("CoreMultishellSpec is specific to :track1_nanobio; do not attach biological core-multishell release strata to :$track"))
         epistemic_status == :predicted ||
@@ -3064,7 +3071,14 @@ struct CoreMultishellSpec
         pm = Float64(membrane_permeability_um_s)
         fv = Float64(channel_flow_velocity_mm_s)
         pm > 0 && fv > 0 || throw(ArgumentError("membrane_permeability_um_s and channel_flow_velocity_mm_s must be > 0"))
-        new(r_vec, d_vec, k_vec, c_vec, pm, fv, track, epistemic_status)
+
+        m_names = isempty(material_names) ? String["stratum_$l" for l in 1:L] : String.(material_names)
+        length(m_names) == L || throw(ArgumentError("material_names must have length $L"))
+        k_part = isempty(partition_coefficients) ? ones(Float64, L) : Float64.(partition_coefficients)
+        length(k_part) == L || throw(ArgumentError("partition_coefficients must have length $L"))
+        all(x -> isfinite(x) && x > 0, k_part) || throw(ArgumentError("partition_coefficients must be finite and > 0"))
+
+        new(r_vec, d_vec, k_vec, c_vec, pm, fv, track, epistemic_status, m_names, k_part)
     end
 end
 
@@ -3197,6 +3211,380 @@ function solve_core_multishell_rd(spec::CoreMultishellSpec;
         spec,
         snapshots,
         "Simulated reaction-diffusion concentration shells (:predicted); not observed physical layers unless independently verified by imaging."
+    )
+end
+
+"""
+Construct Ghosh et al. (2010) Vitamin B12-targeted PEGMA magnetic nanocarrier specification:
+- Reference: Ghosh et al., Nanoscale Res. Lett. 2010, 5:195 (PMC2894335).
+- Hydrodynamic diameter: 315 nm (R = [0.080, 0.125, 0.1575] um).
+- Strata: Fe3O4 magnetic core, PEGMA hydrogel intermediate shell, Vitamin B12 targeting corona.
+"""
+function Ghosh2010_B12_PEGMA_315nm(; channel_flow_velocity_mm_s::Real=15.0)
+    return CoreMultishellSpec(
+        radii_um = [0.080, 0.125, 0.1575],
+        diffusivities_um2_s = [1.0e-4, 2.5e-3, 2.5e-2],
+        decay_rates_s = [0.0005, 0.001, 0.001],
+        initial_concentrations = [0.050, 0.020, 0.005],
+        membrane_permeability_um_s = 0.05,
+        channel_flow_velocity_mm_s = channel_flow_velocity_mm_s,
+        track = :track1_nanobio,
+        epistemic_status = :predicted,
+        material_names = ["Fe3O4_core", "PEGMA_intermediate_shell", "B12_targeting_corona"],
+        partition_coefficients = [3.2, 1.5, 1.0]
+    )
+end
+
+"""
+Construct Ghosh et al. double-shell cisplatin chemotherapeutic nanocarrier specification:
+- Reference: US Patents 11,077,191 B2 and 11,648,313 B2.
+- Hydrodynamic diameter: 191 nm (R = [0.045, 0.075, 0.0955] um).
+- Strata: Cisplatin drug depot core, PLGA diffusion barrier shell, PEG stealth outer shell.
+"""
+function GhoshPatent_Cisplatin_DoubleShell_191nm(; channel_flow_velocity_mm_s::Real=15.0)
+    return CoreMultishellSpec(
+        radii_um = [0.045, 0.075, 0.0955],
+        diffusivities_um2_s = [2.0e-4, 3.5e-3, 3.8e-2],
+        decay_rates_s = [0.0002, 0.0008, 0.0015],
+        initial_concentrations = [0.080, 0.030, 0.005],
+        membrane_permeability_um_s = 0.06,
+        channel_flow_velocity_mm_s = channel_flow_velocity_mm_s,
+        track = :track1_nanobio,
+        epistemic_status = :predicted,
+        material_names = ["Cisplatin_depot_core", "PLGA_diffusion_barrier_shell", "PEG_stealth_outer_shell"],
+        partition_coefficients = [4.5, 1.8, 1.0]
+    )
+end
+
+struct CoreMultishellFitResult
+    fitted_spec::CoreMultishellSpec
+    fitted_diffusivities_um2_s::Vector{Float64}
+    fitted_permeability_um_s::Float64
+    r_squared::Float64
+    rmse::Float64
+    converged::Bool
+    iterations::Int
+    predicted_release::Vector{Float64}
+    observed_release::Vector{Float64}
+    times_s::Vector{Float64}
+    epistemic_status::Symbol
+    epistemic_label::String
+end
+
+"""
+Fit effective core-multishell transport parameters (diffusivities and membrane permeability)
+to observed cumulative release time series (times_s, observed_release) using non-linear least squares.
+"""
+function fit_core_multishell_release_curve(
+        times_s::AbstractVector{<:Real},
+        observed_release::AbstractVector{<:Real};
+        base_spec::CoreMultishellSpec=Ghosh2010_B12_PEGMA_315nm(),
+        n_radial_nodes::Int=24,
+        max_iters::Int=100,
+        tol::Real=1e-5)
+    length(times_s) == length(observed_release) ||
+        throw(ArgumentError("times_s and observed_release must have equal length"))
+    !isempty(times_s) && issorted(times_s) && first(times_s) >= 0 ||
+        throw(ArgumentError("times_s must be non-empty, sorted, and >= 0"))
+    all(x -> 0.0 <= x <= 1.05, observed_release) ||
+        throw(ArgumentError("observed_release values must lie in [0, 1]"))
+
+    y_obs = Float64.(observed_release)
+    t_vec = Float64.(times_s)
+
+    function objective(theta)
+        alpha_D, Pm = theta[1], theta[2]
+        if alpha_D <= 1e-6 || Pm <= 1e-6
+            return 1e6
+        end
+        trial_spec = CoreMultishellSpec(
+            radii_um = base_spec.radii_um,
+            diffusivities_um2_s = base_spec.diffusivities_um2_s .* alpha_D,
+            decay_rates_s = base_spec.decay_rates_s,
+            initial_concentrations = base_spec.initial_concentrations,
+            membrane_permeability_um_s = Pm,
+            channel_flow_velocity_mm_s = base_spec.channel_flow_velocity_mm_s,
+            track = base_spec.track,
+            epistemic_status = base_spec.epistemic_status,
+            material_names = base_spec.material_names,
+            partition_coefficients = base_spec.partition_coefficients
+        )
+        sol = solve_core_multishell_rd(trial_spec; times_s=t_vec, n_radial_nodes=n_radial_nodes)
+        y_pred = [snap.cumulative_release_fraction for snap in sol.snapshots]
+        return sum((y_pred .- y_obs) .^ 2)
+    end
+
+    p0 = [1.0, base_spec.membrane_permeability_um_s]
+    simplex = [p0, p0 .* [1.35, 1.0], p0 .* [1.0, 1.35]]
+    vals = [objective(p) for p in simplex]
+    converged = false
+    n_iter = 0
+
+    for iter in 1:max_iters
+        n_iter = iter
+        perm = sortperm(vals)
+        simplex, vals = simplex[perm], vals[perm]
+        if vals[1] < tol || abs(vals[3] - vals[1]) < tol * 0.1
+            converged = true
+            break
+        end
+        x_bar = (simplex[1] + simplex[2]) / 2.0
+        xr = x_bar + 1.0 * (x_bar - simplex[3])
+        vr = objective(xr)
+        if vr < vals[1]
+            xe = x_bar + 2.0 * (x_bar - simplex[3])
+            ve = objective(xe)
+            if ve < vr
+                simplex[3], vals[3] = xe, ve
+            else
+                simplex[3], vals[3] = xr, vr
+            end
+        elseif vr < vals[2]
+            simplex[3], vals[3] = xr, vr
+        else
+            xc = x_bar + 0.5 * (simplex[3] - x_bar)
+            vc = objective(xc)
+            if vc < vals[3]
+                simplex[3], vals[3] = xc, vc
+            else
+                simplex[2] = (simplex[2] + simplex[1]) / 2.0
+                vals[2] = objective(simplex[2])
+                simplex[3] = (simplex[3] + simplex[1]) / 2.0
+                vals[3] = objective(simplex[3])
+            end
+        end
+    end
+
+    best_idx = argmin(vals)
+    best_theta = simplex[best_idx]
+    best_alpha_D, best_Pm = max(1e-6, best_theta[1]), max(1e-6, best_theta[2])
+
+    fitted_spec = CoreMultishellSpec(
+        radii_um = base_spec.radii_um,
+        diffusivities_um2_s = base_spec.diffusivities_um2_s .* best_alpha_D,
+        decay_rates_s = base_spec.decay_rates_s,
+        initial_concentrations = base_spec.initial_concentrations,
+        membrane_permeability_um_s = best_Pm,
+        channel_flow_velocity_mm_s = base_spec.channel_flow_velocity_mm_s,
+        track = base_spec.track,
+        epistemic_status = base_spec.epistemic_status,
+        material_names = base_spec.material_names,
+        partition_coefficients = base_spec.partition_coefficients
+    )
+    final_sol = solve_core_multishell_rd(fitted_spec; times_s=t_vec, n_radial_nodes=n_radial_nodes)
+    y_final = [snap.cumulative_release_fraction for snap in final_sol.snapshots]
+
+    ss_tot = sum((y_obs .- mean(y_obs)) .^ 2)
+    ss_res = sum((y_obs .- y_final) .^ 2)
+    r2 = 1.0 - (ss_res / max(ss_tot, 1e-12))
+    rmse = sqrt(ss_res / length(y_obs))
+
+    return CoreMultishellFitResult(
+        fitted_spec,
+        fitted_spec.diffusivities_um2_s,
+        best_Pm,
+        clamp(r2, -1.0, 1.0),
+        rmse,
+        converged,
+        n_iter,
+        y_final,
+        y_obs,
+        t_vec,
+        :predicted,
+        "Simulated parameter recovery (:predicted); requires wet-lab empirical release validation."
+    )
+end
+
+struct PulsedDutyCycleComparison
+    times_s::Vector{Float64}
+    field_gated_permeability_um_s::Vector{Float64}
+    thermal_lag_permeability_um_s::Vector{Float64}
+    field_gated_release_fraction::Vector{Float64}
+    thermal_lag_release_fraction::Vector{Float64}
+    field_gated_flux::Vector{Float64}
+    thermal_lag_flux::Vector{Float64}
+    is_field_active::Vector{Bool}
+    duty_cycle::Float64
+    period_s::Float64
+    thermal_relaxation_time_s::Float64
+    field_on_release_fraction_step::Float64
+    field_on_release_fraction_thermal::Float64
+    thermal_leakback_fraction::Float64
+    epistemic_status::Symbol
+    epistemic_label::String
+end
+
+"""
+Simulate pulsed duty-cycle release comparing ideal square-wave field-gated shell actuation
+versus physical thermal-lag relaxation kinetics.
+"""
+function simulate_pulsed_duty_cycle_release(
+        spec::CoreMultishellSpec=Ghosh2010_B12_PEGMA_315nm();
+        total_time_s::Real=60.0,
+        period_s::Real=10.0,
+        duty_cycle::Real=0.20,
+        active_permeability_multiplier::Real=15.0,
+        thermal_relaxation_time_s::Real=2.0,
+        n_radial_nodes::Int=24,
+        n_output_points::Int=61)
+    total_time_s > 0 && period_s > 0 && 0 < duty_cycle < 1 ||
+        throw(ArgumentError("total_time_s > 0, period_s > 0, and 0 < duty_cycle < 1 required"))
+    active_permeability_multiplier > 1.0 ||
+        throw(ArgumentError("active_permeability_multiplier must be > 1.0"))
+    thermal_relaxation_time_s > 0 ||
+        throw(ArgumentError("thermal_relaxation_time_s must be > 0"))
+
+    times_s = collect(range(0.0, Float64(total_time_s), length=n_output_points))
+    R_max = spec.radii_um[end]
+    dr = R_max / n_radial_nodes
+    r_centers = [(i - 0.5) * dr for i in 1:n_radial_nodes]
+    r_faces = [i * dr for i in 0:n_radial_nodes]
+    shell_vols = [(4.0 * pi / 3.0) * (r_faces[i + 1]^3 - r_faces[i]^3) for i in 1:n_radial_nodes]
+
+    stratum_idx = Vector{Int}(undef, n_radial_nodes)
+    D_node = Vector{Float64}(undef, n_radial_nodes)
+    k_node = Vector{Float64}(undef, n_radial_nodes)
+    u_step = Vector{Float64}(undef, n_radial_nodes)
+    u_therm = Vector{Float64}(undef, n_radial_nodes)
+
+    for i in 1:n_radial_nodes
+        rc = r_centers[i]
+        l = findfirst(r_bound -> rc <= r_bound, spec.radii_um)
+        l_idx = l === nothing ? length(spec.radii_um) : l
+        stratum_idx[i] = l_idx
+        D_node[i] = spec.diffusivities_um2_s[l_idx]
+        k_node[i] = spec.decay_rates_s[l_idx]
+        u_step[i] = spec.initial_concentrations[l_idx]
+        u_therm[i] = spec.initial_concentrations[l_idx]
+    end
+
+    D_face = zeros(Float64, n_radial_nodes + 1)
+    for i in 1:(n_radial_nodes - 1)
+        D_face[i + 1] = 2.0 * D_node[i] * D_node[i + 1] / (D_node[i] + D_node[i + 1])
+    end
+
+    initial_mass = sum(u_step[i] * shell_vols[i] for i in 1:n_radial_nodes)
+    p_base = spec.membrane_permeability_um_s
+    p_active = p_base * Float64(active_permeability_multiplier)
+    tau_th = Float64(thermal_relaxation_time_s)
+
+    rate_diff = 3.5 * maximum(D_node) / (dr * dr)
+    rate_robin_max = (4.0 * pi * (R_max^2) * p_active) / shell_vols[n_radial_nodes]
+    rate_decay = maximum(k_node)
+    dt_max = 0.35 / max(rate_diff + rate_robin_max + rate_decay, 1e-12)
+
+    n_out = length(times_s)
+    pm_step_hist = zeros(Float64, n_out)
+    pm_therm_hist = zeros(Float64, n_out)
+    rel_step_hist = zeros(Float64, n_out)
+    rel_therm_hist = zeros(Float64, n_out)
+    flux_step_hist = zeros(Float64, n_out)
+    flux_therm_hist = zeros(Float64, n_out)
+    is_on_hist = zeros(Bool, n_out)
+
+    t_cur = 0.0
+    p_cur_therm = p_base
+    du_step = zeros(Float64, n_radial_nodes)
+    du_therm = zeros(Float64, n_radial_nodes)
+
+    mass_on_step = 0.0
+    mass_off_step = 0.0
+    mass_on_therm = 0.0
+    mass_off_therm = 0.0
+
+    for (snap_idx, t_target) in enumerate(times_s)
+        while t_cur < t_target - 1e-12
+            dt = min(dt_max, t_target - t_cur)
+            tau_mod = mod(t_cur, Float64(period_s))
+            is_active = tau_mod < (Float64(period_s) * Float64(duty_cycle))
+
+            pm_s = is_active ? p_active : p_base
+            p_target = pm_s
+            p_cur_therm = p_target + (p_cur_therm - p_target) * exp(-dt / tau_th)
+
+            # Step-gated flux
+            fill!(du_step, 0.0)
+            for i in 1:(n_radial_nodes - 1)
+                area = 4.0 * pi * (r_faces[i + 1]^2)
+                f_flux = -D_face[i + 1] * (u_step[i + 1] - u_step[i]) / dr
+                du_step[i] -= area * f_flux / shell_vols[i]
+                du_step[i + 1] += area * f_flux / shell_vols[i + 1]
+            end
+            outer_area = 4.0 * pi * (R_max^2)
+            out_flux_step = pm_s * u_step[n_radial_nodes]
+            du_step[n_radial_nodes] -= outer_area * out_flux_step / shell_vols[n_radial_nodes]
+            for i in 1:n_radial_nodes
+                du_step[i] -= k_node[i] * u_step[i]
+                u_step[i] = max(0.0, u_step[i] + dt * du_step[i])
+            end
+            if is_active
+                mass_on_step += outer_area * out_flux_step * dt
+            else
+                mass_off_step += outer_area * out_flux_step * dt
+            end
+
+            # Thermal-lag flux
+            fill!(du_therm, 0.0)
+            for i in 1:(n_radial_nodes - 1)
+                area = 4.0 * pi * (r_faces[i + 1]^2)
+                f_flux = -D_face[i + 1] * (u_therm[i + 1] - u_therm[i]) / dr
+                du_therm[i] -= area * f_flux / shell_vols[i]
+                du_therm[i + 1] += area * f_flux / shell_vols[i + 1]
+            end
+            out_flux_therm = p_cur_therm * u_therm[n_radial_nodes]
+            du_therm[n_radial_nodes] -= outer_area * out_flux_therm / shell_vols[n_radial_nodes]
+            for i in 1:n_radial_nodes
+                du_therm[i] -= k_node[i] * u_therm[i]
+                u_therm[i] = max(0.0, u_therm[i] + dt * du_therm[i])
+            end
+            if is_active
+                mass_on_therm += outer_area * out_flux_therm * dt
+            else
+                mass_off_therm += outer_area * out_flux_therm * dt
+            end
+
+            t_cur += dt
+        end
+
+        tau_cur = mod(t_target, Float64(period_s))
+        is_cur_on = tau_cur < (Float64(period_s) * Float64(duty_cycle))
+        pm_s_now = is_cur_on ? p_active : p_base
+
+        rem_step = sum(u_step[i] * shell_vols[i] for i in 1:n_radial_nodes)
+        rem_therm = sum(u_therm[i] * shell_vols[i] for i in 1:n_radial_nodes)
+
+        pm_step_hist[snap_idx] = pm_s_now
+        pm_therm_hist[snap_idx] = p_cur_therm
+        rel_step_hist[snap_idx] = clamp(1.0 - rem_step / initial_mass, 0.0, 1.0)
+        rel_therm_hist[snap_idx] = clamp(1.0 - rem_therm / initial_mass, 0.0, 1.0)
+        flux_step_hist[snap_idx] = pm_s_now * u_step[n_radial_nodes]
+        flux_therm_hist[snap_idx] = p_cur_therm * u_therm[n_radial_nodes]
+        is_on_hist[snap_idx] = is_cur_on
+    end
+
+    tot_step = mass_on_step + mass_off_step
+    tot_therm = mass_on_therm + mass_off_therm
+    f_on_step = tot_step > 0 ? mass_on_step / tot_step : 0.0
+    f_on_therm = tot_therm > 0 ? mass_on_therm / tot_therm : 0.0
+    leakback = clamp(f_on_step - f_on_therm, 0.0, 1.0)
+
+    return PulsedDutyCycleComparison(
+        times_s,
+        pm_step_hist,
+        pm_therm_hist,
+        rel_step_hist,
+        rel_therm_hist,
+        flux_step_hist,
+        flux_therm_hist,
+        is_on_hist,
+        Float64(duty_cycle),
+        Float64(period_s),
+        tau_th,
+        f_on_step,
+        f_on_therm,
+        leakback,
+        :predicted,
+        "MODEL PREDICTION - illustrative parameters - no lab data"
     )
 end
 
@@ -3362,7 +3750,7 @@ module BiofilmMultiphysics
 using LinearAlgebra
 using Statistics
 import ..FlowCytometryObservationModel:
-    VALID_EPISTEMIC_STATUSES, VALID_VALIDATION_LADDER_GATES,
+    VALID_EPISTEMIC_STATUSES, VALID_VALIDATION_LADDER_GATES, VALID_ORGANISM_STRAINS,
     CellStatePrediction, OpenFOAMMeshExchange, PHREEQCSpeciesAdapter,
     EmpiricalValidationProtocol,
     DimensionalQuantity, ParameterProvenanceEntry, ParameterProvenanceRegistry,
@@ -3375,6 +3763,7 @@ import ..FlowCytometryObservationModel:
 
 export VALID_QS_TOPOLOGIES, VALID_MORPHOLOGICAL_PHASES,
        VALID_CONSTITUTIVE_MATURITY_LEVELS, ConstitutiveMaturityLevel,
+       SA_REGULATORY_MARKER_NODES, PA_REGULATORY_MARKER_NODES,
        BiofilmHypothesisSwitches,
        BiofilmMatrixComposition, total_matrix_biopolymer_kg_m3,
        ThinFilmSwellingMechanicsSpec, evaluate_biofilm_swelling_mechanics,
@@ -3386,6 +3775,11 @@ export VALID_QS_TOPOLOGIES, VALID_MORPHOLOGICAL_PHASES,
        QSRegulatoryTopology,
        ElectrokineticQSSpec, evaluate_qs_signal_degradation,
        compare_spatial_vs_multiplicative_ahl_shielding,
+       HydrogelBiofilmShearModulusContract, evaluate_hydrogel_shear_modulus,
+       DevelopingFlowShearContract, shah_london_friction_factor_re,
+       compute_hydrodynamic_entrance_length, evaluate_developing_flow_shear,
+       SerpentineViscoelasticFocusingContract, evaluate_serpentine_viscoelastic_focusing,
+       categorize_mechanistic_quantities,
        PolymicrobialCrosstalkSpec, evaluate_polymicrobial_crosstalk,
        BiofilmRegulatoryState, BiofilmRegulatoryParams,
        step_biofilm_regulatory_ode, simulate_biofilm_regulatory_trajectory,
@@ -3394,8 +3788,10 @@ export VALID_QS_TOPOLOGIES, VALID_MORPHOLOGICAL_PHASES,
        RegulatoryInteractionEdge, RegulatoryNetworkGraph,
        build_species_regulatory_network, validate_regulatory_network_applicability,
        DroopQuotaMassBalanceAudit, audit_droop_quota_conservation,
+       DroopCellQuotaModel, simulate_droop_quota_dynamics, audit_droop_mass_conservation,
        run_biofilm_ablation_matrix,
-       ValidationLadderReport, evaluate_validation_ladder
+       ValidationLadderReport, evaluate_validation_ladder,
+       GateStatusFlags, GateStatus5Tier
 
 const VALID_QS_TOPOLOGIES = (
     :staphylococcus_agr_rnaiii_psm,
@@ -3417,6 +3813,15 @@ const VALID_CONSTITUTIVE_MATURITY_LEVELS = (
 )
 
 const ConstitutiveMaturityLevel = Symbol
+
+const SA_REGULATORY_MARKER_NODES = (
+    "AIP_I", "AgrC_AgrA", "RNAIII", "alpha_PSM", "EV_Biogenesis", "FruA_FruK_Fructose_Flux",
+    "Vancomycin_Tolerant_Subpop", "Oxidative_Stress_Repair_Subpop",
+)
+
+const PA_REGULATORY_MARKER_NODES = (
+    "3OC12_HSL", "LasI_LasR", "C4_HSL", "PqsE_Chaperone", "RhlR_Regulon", "Pyocyanin_HQNO_Effector",
+)
 
 """
 Independently switchable mechanistic hypothesis flags for M3 and M4 so each
@@ -4296,6 +4701,531 @@ function compare_spatial_vs_multiplicative_ahl_shielding(
         penetration_depth_um = penetration_depth_m * 1.0e6,
         spatial_resolution_required = (thiele_modulus > 1.0) || (rel_disc > 0.15)
     )
+end
+
+# ===========================================================================
+# Milestone M2 (R3.5): Microfluidic Experimental Characterization Contracts
+# Control 3 Mechanistic Status Tagging:
+#   - :analytical_solution
+#   - :numerical_prediction
+#   - :experimental_contract
+#   - :calibrated_constitutive_model
+# ===========================================================================
+
+"""
+Contract 1: Hydrogel / biofilm shear modulus characterization via tapered-constriction
+transit deformation (Milestone M2 / R3.5).
+Quantifies entry and throat kinematics, apparent Taylor elongation strain, accumulated
+shear strain during constriction transit, and calibrated shear modulus G = Delta P / (gamma * f(epsilon)).
+"""
+struct HydrogelBiofilmShearModulusContract
+    # Experimental contract: geometry and measured operating conditions
+    contract_id::String
+    entry_width_m::Float64
+    throat_width_m::Float64
+    constriction_length_m::Float64
+    channel_height_m::Float64
+    applied_pressure_drop_pa::Float64
+    volumetric_flow_rate_m3_s::Float64
+    transit_duration_s::Float64
+    undeformed_particle_diameter_m::Float64
+    deformed_length_m::Float64
+    deformed_width_m::Float64
+
+    # Analytical solution: geometric ratios, apparent strain, and throat kinematics
+    taper_angle_rad::Float64
+    constriction_ratio::Float64
+    taylor_deformation_parameter::Float64
+    apparent_strain::Float64
+    throat_hydraulic_diameter_m::Float64
+    throat_mean_velocity_m_s::Float64
+    throat_wall_shear_rate_s::Float64
+
+    # Numerical prediction: transit Reynolds number and accumulated shear strain
+    throat_reynolds_number::Float64
+    transit_shear_strain::Float64
+    strain_hardening_factor::Float64
+
+    # Calibrated constitutive model: biofilm / hydrogel shear modulus G
+    shear_modulus_pa::Float64
+    constitutive_law::Symbol
+    strain_hardening_coeff::Float64
+
+    # Mechanistic status tagging (Control 3)
+    mechanistic_status_tags::Dict{Symbol,Symbol}
+    contract_verified::Bool
+    verification_notes::Vector{String}
+
+    function HydrogelBiofilmShearModulusContract(;
+            contract_id::String="HYDROGEL-SHEAR-001",
+            entry_width_m::Real=50.0e-6,
+            throat_width_m::Real=15.0e-6,
+            constriction_length_m::Real=120.0e-6,
+            channel_height_m::Real=25.0e-6,
+            applied_pressure_drop_pa::Real=2400.0,
+            volumetric_flow_rate_m3_s::Real=5.0e-11,
+            transit_duration_s::Real=1.2e-3,
+            undeformed_particle_diameter_m::Real=20.0e-6,
+            deformed_length_m::Real=28.0e-6,
+            deformed_width_m::Real=14.0e-6,
+            fluid_viscosity_pa_s::Real=1.0e-3,
+            fluid_density_kg_m3::Real=1000.0,
+            strain_hardening_coeff::Real=0.5,
+            constitutive_law::Symbol=:neo_hookean)
+
+        we = Float64(entry_width_m)
+        wt = Float64(throat_width_m)
+        lc = Float64(constriction_length_m)
+        h = Float64(channel_height_m)
+        dp = Float64(applied_pressure_drop_pa)
+        q = Float64(volumetric_flow_rate_m3_s)
+        dt = Float64(transit_duration_s)
+        d0 = Float64(undeformed_particle_diameter_m)
+        ldef = Float64(deformed_length_m)
+        wdef = Float64(deformed_width_m)
+        mu = Float64(fluid_viscosity_pa_s)
+        rho = Float64(fluid_density_kg_m3)
+        beta = Float64(strain_hardening_coeff)
+
+        we > 0 && wt > 0 && lc > 0 && h > 0 ||
+            throw(ArgumentError("channel dimensions must be positive"))
+        we > wt || throw(ArgumentError("entry_width_m must exceed throat_width_m"))
+        dp > 0 && q > 0 && dt > 0 ||
+            throw(ArgumentError("applied_pressure_drop_pa, flow rate, and transit duration must be positive"))
+        d0 > 0 && ldef > 0 && wdef > 0 ||
+            throw(ArgumentError("particle dimensions must be positive"))
+        mu > 0 && rho > 0 ||
+            throw(ArgumentError("fluid properties must be positive"))
+
+        # Analytical solution quantities
+        taper_angle = atan((we - wt) / (2.0 * lc))
+        constriction_ratio = we / wt
+        taylor_eps = (ldef - wdef) / (ldef + wdef)
+        eps = taylor_eps
+        eps > 0 || throw(ArgumentError("deformed_length_m must exceed deformed_width_m for extension strain"))
+
+        a_t = wt * h
+        dh_t = (2.0 * wt * h) / (wt + h)
+        u_t = q / a_t
+        gamma_dot = 6.0 * u_t / min(wt, h)
+
+        # Numerical prediction quantities
+        re_t = (rho * u_t * dh_t) / mu
+        gamma_shear = gamma_dot * dt
+        gamma_shear > 0 || throw(ArgumentError("accumulated shear strain must be positive"))
+
+        f_eps = eps * (1.0 + beta * eps^2)
+        f_eps > 0 || throw(ArgumentError("strain hardening factor must be positive"))
+
+        # Calibrated constitutive model: G = Delta P / (gamma * f(epsilon))
+        g_modulus = dp / (gamma_shear * f_eps)
+
+        tags = Dict{Symbol,Symbol}(
+            :entry_width_m => :experimental_contract,
+            :throat_width_m => :experimental_contract,
+            :constriction_length_m => :experimental_contract,
+            :channel_height_m => :experimental_contract,
+            :applied_pressure_drop_pa => :experimental_contract,
+            :volumetric_flow_rate_m3_s => :experimental_contract,
+            :transit_duration_s => :experimental_contract,
+            :undeformed_particle_diameter_m => :experimental_contract,
+            :deformed_length_m => :experimental_contract,
+            :deformed_width_m => :experimental_contract,
+            :taper_angle_rad => :analytical_solution,
+            :constriction_ratio => :analytical_solution,
+            :taylor_deformation_parameter => :analytical_solution,
+            :apparent_strain => :analytical_solution,
+            :throat_hydraulic_diameter_m => :analytical_solution,
+            :throat_mean_velocity_m_s => :analytical_solution,
+            :throat_wall_shear_rate_s => :analytical_solution,
+            :throat_reynolds_number => :numerical_prediction,
+            :transit_shear_strain => :numerical_prediction,
+            :strain_hardening_factor => :numerical_prediction,
+            :shear_modulus_pa => :calibrated_constitutive_model,
+            :strain_hardening_coeff => :calibrated_constitutive_model
+        )
+
+        notes = String[]
+        push!(notes, "Geometric constriction ratio: $(round(constriction_ratio; digits=2))")
+        push!(notes, "Taylor strain epsilon: $(round(eps; digits=4))")
+        push!(notes, "Throat wall shear rate: $(round(gamma_dot; sigdigits=3)) s^-1")
+        push!(notes, "Transit Reynolds number: $(round(re_t; digits=3))")
+        push!(notes, "Calibrated shear modulus G: $(round(g_modulus; digits=2)) Pa")
+
+        verified = (g_modulus > 0) && isfinite(g_modulus) && (0.0 < eps < 1.0) && (re_t < 100.0)
+
+        new(
+            contract_id, we, wt, lc, h, dp, q, dt, d0, ldef, wdef,
+            taper_angle, constriction_ratio, taylor_eps, eps, dh_t, u_t, gamma_dot,
+            re_t, gamma_shear, f_eps, g_modulus, constitutive_law, beta,
+            tags, verified, notes
+        )
+    end
+end
+
+evaluate_hydrogel_shear_modulus(; kwargs...) = HydrogelBiofilmShearModulusContract(; kwargs...)
+
+"""
+Shah & London (1978) analytical series for laminar friction factor across rectangular
+ducts of aspect ratio alpha in [0, 1]:
+f * Re = 96 * (1 - 1.3553*alpha + 1.9467*alpha^2 - 1.7012*alpha^3 + 0.9564*alpha^4 - 0.2537*alpha^5)
+"""
+function shah_london_friction_factor_re(alpha::Real)
+    a = Float64(alpha)
+    (0.0 <= a <= 1.0) || throw(ArgumentError("aspect ratio alpha must be in [0, 1], got $alpha"))
+    return 96.0 * (1.0 - 1.3553 * a + 1.9467 * a^2 - 1.7012 * a^3 + 0.9564 * a^4 - 0.2537 * a^5)
+end
+
+"""
+Compute analytical hydrodynamic entrance length L_e for laminar duct flow.
+For circular channels: L_e = 0.056 * Re * D_h.
+For square channels: L_e = (0.0565 + 0.024) * Re * D_h = 0.0805 * Re * D_h.
+For rectangular channels: L_e = (0.0565 + 0.024 * alpha) * Re * D_h.
+"""
+function compute_hydrodynamic_entrance_length(geometry::Symbol, re::Real, dh::Real, alpha::Real=1.0)
+    Re = Float64(re)
+    Dh = Float64(dh)
+    Re >= 0 && Dh > 0 || throw(ArgumentError("Reynolds number and hydraulic diameter must be non-negative"))
+    if geometry == :circular
+        return 0.056 * Re * Dh
+    elseif geometry == :square
+        return (0.0565 + 0.024 * 1.0) * Re * Dh
+    elseif geometry == :rectangular
+        a = Float64(alpha)
+        (0.0 <= a <= 1.0) || throw(ArgumentError("aspect ratio alpha must be in [0, 1]"))
+        return (0.0565 + 0.024 * a) * Re * Dh
+    else
+        throw(ArgumentError("unknown geometry: $geometry (expected :circular, :square, or :rectangular)"))
+    end
+end
+
+"""
+Contract 2: Developing-flow wall shear stress and hydrodynamic entrance length characterization (Milestone M2 / R3.5).
+Evaluates analytical friction factors across circular (f*Re=64), square (f*Re=56.91), and rectangular ducts
+using the Shah & London (1978) series, analytical entrance length L_e, and numerically discretized developing
+wall shear stress profile tau_w(x).
+"""
+struct DevelopingFlowShearContract
+    # Experimental contract: channel geometry, dimensions, flow rate, and fluid properties
+    contract_id::String
+    channel_geometry::Symbol
+    width_m::Float64
+    height_m::Float64
+    channel_length_m::Float64
+    volumetric_flow_rate_m3_s::Float64
+    fluid_density_kg_m3::Float64
+    fluid_viscosity_pa_s::Float64
+
+    # Analytical solution: geometric parameters, Shah & London f*Re, and entrance length
+    aspect_ratio::Float64
+    hydraulic_diameter_m::Float64
+    mean_velocity_m_s::Float64
+    reynolds_number::Float64
+    poiseuille_friction_factor_re::Float64
+    fully_developed_wall_shear_pa::Float64
+    hydrodynamic_entrance_length_m::Float64
+
+    # Numerical prediction: developing spatial discretization of wall shear stress tau_w(x)
+    x_positions_m::Vector{Float64}
+    apparent_friction_factor_re::Vector{Float64}
+    developing_wall_shear_pa::Vector{Float64}
+    peak_inlet_shear_pa::Float64
+    shear_monotonic_decay_verified::Bool
+
+    # Mechanistic status tagging (Control 3)
+    mechanistic_status_tags::Dict{Symbol,Symbol}
+    contract_verified::Bool
+    verification_notes::Vector{String}
+
+    function DevelopingFlowShearContract(;
+            contract_id::String="DEV-FLOW-SHEAR-001",
+            channel_geometry::Symbol=:rectangular,
+            width_m::Real=100.0e-6,
+            height_m::Real=50.0e-6,
+            channel_length_m::Real=5.0e-3,
+            volumetric_flow_rate_m3_s::Real=1.0e-9,
+            fluid_density_kg_m3::Real=1000.0,
+            fluid_viscosity_pa_s::Real=1.0e-3,
+            n_evaluation_points::Int=50)
+
+        channel_geometry in (:circular, :square, :rectangular) ||
+            throw(ArgumentError("channel_geometry must be :circular, :square, or :rectangular"))
+        w = Float64(width_m)
+        h = Float64(height_m)
+        l = Float64(channel_length_m)
+        q = Float64(volumetric_flow_rate_m3_s)
+        rho = Float64(fluid_density_kg_m3)
+        mu = Float64(fluid_viscosity_pa_s)
+        n_pts = n_evaluation_points
+
+        w > 0 && h > 0 && l > 0 && q > 0 && rho > 0 && mu > 0 && n_pts >= 5 ||
+            throw(ArgumentError("invalid arguments in DevelopingFlowShearContract"))
+
+        # Geometry-specific analytical parameters
+        area = 0.0
+        dh = 0.0
+        alpha = 1.0
+        f_re = 0.0
+
+        if channel_geometry == :circular
+            # Circular pipe: width_m is diameter D
+            d = w
+            area = pi * (d / 2.0)^2
+            dh = d
+            alpha = 1.0
+            f_re = 64.0
+        elseif channel_geometry == :square
+            # Square duct: width_m == height_m
+            area = w * w
+            dh = w
+            alpha = 1.0
+            f_re = shah_london_friction_factor_re(1.0)
+        else
+            # Rectangular duct
+            area = w * h
+            dh = (2.0 * w * h) / (w + h)
+            alpha = min(w, h) / max(w, h)
+            f_re = shah_london_friction_factor_re(alpha)
+        end
+
+        u_m = q / area
+        re = (rho * u_m * dh) / mu
+        tau_w_infty = (f_re * mu * u_m) / (8.0 * dh)
+        l_e = compute_hydrodynamic_entrance_length(channel_geometry, re, dh, alpha)
+
+        # Numerical prediction of developing profile along channel length
+        dx = l / n_pts
+        x_positions = [max(1.0e-9, i * dx) for i in 1:n_pts]
+        f_app_re = Float64[]
+        tau_w = Float64[]
+
+        for x in x_positions
+            x_plus = x / (dh * max(re, 1.0e-6))
+            # Shah & London apparent friction factor blending boundary layer and fully developed flow
+            f_app_local = sqrt(f_re^2 + (3.44 / sqrt(x_plus))^2)
+            tau_local = (f_app_local * mu * u_m) / (8.0 * dh)
+            push!(f_app_re, f_app_local)
+            push!(tau_w, tau_local)
+        end
+
+        peak_shear = first(tau_w)
+        monotonic_decay = all(tau_w[i] >= tau_w[i + 1] - 1.0e-9 for i in 1:(n_pts - 1))
+
+        tags = Dict{Symbol,Symbol}(
+            :channel_geometry => :experimental_contract,
+            :width_m => :experimental_contract,
+            :height_m => :experimental_contract,
+            :channel_length_m => :experimental_contract,
+            :volumetric_flow_rate_m3_s => :experimental_contract,
+            :fluid_density_kg_m3 => :experimental_contract,
+            :fluid_viscosity_pa_s => :calibrated_constitutive_model,
+            :aspect_ratio => :analytical_solution,
+            :hydraulic_diameter_m => :analytical_solution,
+            :mean_velocity_m_s => :analytical_solution,
+            :reynolds_number => :analytical_solution,
+            :poiseuille_friction_factor_re => :analytical_solution,
+            :fully_developed_wall_shear_pa => :analytical_solution,
+            :hydrodynamic_entrance_length_m => :analytical_solution,
+            :x_positions_m => :numerical_prediction,
+            :apparent_friction_factor_re => :numerical_prediction,
+            :developing_wall_shear_pa => :numerical_prediction,
+            :peak_inlet_shear_pa => :numerical_prediction,
+            :shear_monotonic_decay_verified => :numerical_prediction
+        )
+
+        notes = String[]
+        push!(notes, "Geometry: $channel_geometry (aspect ratio alpha = $(round(alpha; digits=3)))")
+        push!(notes, "Poiseuille friction factor f*Re: $(round(f_re; digits=3))")
+        push!(notes, "Entrance length L_e: $(round(l_e * 1.0e6; digits=1)) um (Re = $(round(re; digits=2)))")
+        push!(notes, "Fully developed wall shear: $(round(tau_w_infty; digits=3)) Pa")
+        push!(notes, "Inlet peak developing shear: $(round(peak_shear; digits=3)) Pa")
+
+        verified = (f_re > 0) && isfinite(f_re) && (l_e > 0) && monotonic_decay && (re < 2000.0)
+
+        new(
+            contract_id, channel_geometry, w, h, l, q, rho, mu,
+            alpha, dh, u_m, re, f_re, tau_w_infty, l_e,
+            x_positions, f_app_re, tau_w, peak_shear, monotonic_decay,
+            tags, verified, notes
+        )
+    end
+end
+
+evaluate_developing_flow_shear(; kwargs...) = DevelopingFlowShearContract(; kwargs...)
+
+"""
+Contract 3: Serpentine viscoelastic particle focusing contract (Milestone M2 / R3.5).
+Balances secondary Dean drag force F_D = 3 * pi * mu_f * d_p * U_Dean against viscoelastic
+elastic lift force F_E proportional to d_p^3 * grad N_1, evaluating Dean number De = Re * sqrt(D_h / (2 * R_c)),
+Weissenberg number Wi = lambda * dot{gamma}, and the focusing regime criterion Wi * De^(-1/2) >= 1.0.
+"""
+struct SerpentineViscoelasticFocusingContract
+    # Experimental contract: serpentine channel dimensions, curvature, particle, and flow rate
+    contract_id::String
+    channel_width_m::Float64
+    channel_height_m::Float64
+    radius_of_curvature_m::Float64
+    number_of_turns::Int
+    particle_diameter_m::Float64
+    volumetric_flow_rate_m3_s::Float64
+    fluid_density_kg_m3::Float64
+    fluid_viscosity_pa_s::Float64
+    relaxation_time_s::Float64
+
+    # Analytical solution: Dean number, Weissenberg number, focusing regime ratio
+    hydraulic_diameter_m::Float64
+    mean_velocity_m_s::Float64
+    reynolds_number::Float64
+    dean_number::Float64
+    characteristic_shear_rate_s::Float64
+    weissenberg_number::Float64
+    focusing_regime_parameter::Float64
+    single_line_focusing_predicted::Bool
+
+    # Numerical prediction: Dean velocity, Dean drag force, and elastic lift force
+    dean_velocity_m_s::Float64
+    dean_drag_force_n::Float64
+    first_normal_stress_difference_pa::Float64
+    first_normal_stress_gradient_pa_m::Float64
+    elastic_lift_coefficient::Float64
+    elastic_lift_force_n::Float64
+    force_ratio_fe_over_fd::Float64
+
+    # Mechanistic status tagging (Control 3)
+    mechanistic_status_tags::Dict{Symbol,Symbol}
+    contract_verified::Bool
+    verification_notes::Vector{String}
+
+    function SerpentineViscoelasticFocusingContract(;
+            contract_id::String="SERPENTINE-FOCUS-001",
+            channel_width_m::Real=50.0e-6,
+            channel_height_m::Real=50.0e-6,
+            radius_of_curvature_m::Real=500.0e-6,
+            number_of_turns::Int=15,
+            particle_diameter_m::Real=10.0e-6,
+            volumetric_flow_rate_m3_s::Real=2.5e-10,
+            fluid_density_kg_m3::Real=1000.0,
+            fluid_viscosity_pa_s::Real=1.5e-3,
+            relaxation_time_s::Real=2.5e-3,
+            elastic_lift_coefficient::Real=0.15)
+
+        w = Float64(channel_width_m)
+        h = Float64(channel_height_m)
+        rc = Float64(radius_of_curvature_m)
+        turns = number_of_turns
+        dp = Float64(particle_diameter_m)
+        q = Float64(volumetric_flow_rate_m3_s)
+        rho = Float64(fluid_density_kg_m3)
+        mu = Float64(fluid_viscosity_pa_s)
+        lambda = Float64(relaxation_time_s)
+        c_el = Float64(elastic_lift_coefficient)
+
+        w > 0 && h > 0 && rc > 0 && turns >= 1 && dp > 0 && q > 0 && rho > 0 && mu > 0 && lambda > 0 && c_el > 0 ||
+            throw(ArgumentError("invalid arguments in SerpentineViscoelasticFocusingContract"))
+
+        # Analytical solution quantities
+        area = w * h
+        dh = (2.0 * w * h) / (w + h)
+        u_m = q / area
+        re = (rho * u_m * dh) / mu
+        de = re * sqrt(dh / (2.0 * rc))
+        gamma_dot = 2.0 * u_m / min(w, h)
+        wi = lambda * gamma_dot
+
+        # Focusing regime parameter: chi = Wi * De^(-1/2)
+        de_safe = max(de, 1.0e-9)
+        chi = wi / sqrt(de_safe)
+        focusing_predicted = (chi >= 1.0)
+
+        # Numerical prediction quantities
+        # Secondary Dean circulation velocity: U_Dean = 1.8e-3 * De^1.63 * U_m
+        u_dean = 1.8e-3 * (de_safe^1.63) * u_m
+        # Dean drag force: F_D = 3 * pi * mu_f * d_p * U_Dean
+        f_d = 3.0 * pi * mu * dp * u_dean
+
+        # First normal stress difference: N_1 = 2 * mu_f * lambda * dot{gamma}^2
+        n1 = 2.0 * mu * lambda * (gamma_dot^2)
+        # Gradient of N_1 across half-channel width: grad N_1 = 2 * N_1 / min(W, H)
+        grad_n1 = 2.0 * n1 / min(w, h)
+        # Elastic lift force: F_E = C_eL * d_p^3 * grad N_1
+        f_e = c_el * (dp^3) * grad_n1
+
+        force_ratio = f_e / max(f_d, 1.0e-18)
+
+        tags = Dict{Symbol,Symbol}(
+            :channel_width_m => :experimental_contract,
+            :channel_height_m => :experimental_contract,
+            :radius_of_curvature_m => :experimental_contract,
+            :number_of_turns => :experimental_contract,
+            :particle_diameter_m => :experimental_contract,
+            :volumetric_flow_rate_m3_s => :experimental_contract,
+            :fluid_density_kg_m3 => :experimental_contract,
+            :single_line_focusing_predicted => :experimental_contract,
+            :hydraulic_diameter_m => :analytical_solution,
+            :mean_velocity_m_s => :analytical_solution,
+            :reynolds_number => :analytical_solution,
+            :dean_number => :analytical_solution,
+            :characteristic_shear_rate_s => :analytical_solution,
+            :weissenberg_number => :analytical_solution,
+            :focusing_regime_parameter => :analytical_solution,
+            :dean_velocity_m_s => :numerical_prediction,
+            :dean_drag_force_n => :numerical_prediction,
+            :first_normal_stress_gradient_pa_m => :numerical_prediction,
+            :elastic_lift_force_n => :numerical_prediction,
+            :force_ratio_fe_over_fd => :numerical_prediction,
+            :relaxation_time_s => :calibrated_constitutive_model,
+            :fluid_viscosity_pa_s => :calibrated_constitutive_model,
+            :first_normal_stress_difference_pa => :calibrated_constitutive_model,
+            :elastic_lift_coefficient => :calibrated_constitutive_model
+        )
+
+        notes = String[]
+        push!(notes, "Dean number De: $(round(de; digits=4)) (Re = $(round(re; digits=3)))")
+        push!(notes, "Weissenberg number Wi: $(round(wi; digits=3)) (shear rate = $(round(gamma_dot; digits=1)) s^-1)")
+        push!(notes, "Focusing regime ratio Wi * De^(-1/2): $(round(chi; digits=3)) (criterion >= 1.0: $focusing_predicted)")
+        push!(notes, "Dean drag force F_D: $(round(f_d * 1.0e12; digits=3)) pN")
+        push!(notes, "Elastic lift force F_E: $(round(f_e * 1.0e12; digits=3)) pN")
+        push!(notes, "Force ratio F_E / F_D: $(round(force_ratio; digits=2))")
+
+        verified = isfinite(de) && (de > 0) && isfinite(wi) && (wi > 0) &&
+                   isfinite(f_d) && (f_d > 0) && isfinite(f_e) && (f_e > 0) &&
+                   isfinite(chi) && (chi > 0)
+
+        new(
+            contract_id, w, h, rc, turns, dp, q, rho, mu, lambda,
+            dh, u_m, re, de, gamma_dot, wi, chi, focusing_predicted,
+            u_dean, f_d, n1, grad_n1, c_el, f_e, force_ratio,
+            tags, verified, notes
+        )
+    end
+end
+
+evaluate_serpentine_viscoelastic_focusing(; kwargs...) = SerpentineViscoelasticFocusingContract(; kwargs...)
+
+"""
+Group all tracked quantities of a microfluidic characterization contract under their
+Control 3 mechanistic status tags:
+- :experimental_contract
+- :analytical_solution
+- :numerical_prediction
+- :calibrated_constitutive_model
+"""
+function categorize_mechanistic_quantities(contract::Union{HydrogelBiofilmShearModulusContract, DevelopingFlowShearContract, SerpentineViscoelasticFocusingContract})
+    cats = Dict{Symbol, Vector{Symbol}}(
+        :experimental_contract => Symbol[],
+        :analytical_solution => Symbol[],
+        :numerical_prediction => Symbol[],
+        :calibrated_constitutive_model => Symbol[]
+    )
+    for (qty, tag) in contract.mechanistic_status_tags
+        if haskey(cats, tag)
+            push!(cats[tag], qty)
+        end
+    end
+    for v in values(cats)
+        sort!(v)
+    end
+    return cats
 end
 
 struct PolymicrobialCrosstalkSpec
@@ -5189,7 +6119,7 @@ function build_default_biofilm_provenance_registry()
             si_exponents = (0, 0, 0, 0, 0, 0, 0),
             physical_role = :dimensionless,
             uncertainty_bounds = (0.0, 2.0),
-            organism_strain = :Pseudomonas_aeruginosa_PAO1,
+            organism_strain = :Pseudomonas_aeruginosa_PA14,
             source_status = :literature_derived,
             source_citation = "P. aeruginosa PqsE-RhlR allosteric chaperone coupling (0.0 in S. aureus monoculture)",
             calibrated = true
@@ -5370,6 +6300,19 @@ end
 # Milestone M6.4: Auditable Regulatory Graph G=(V,E) & Droop Conservation
 # ---------------------------------------------------------------------------
 
+function species_matches(sp1::Symbol, sp2::Symbol)
+    sp1 == sp2 && return true
+    sa_set = (:staphylococcus_aureus, :Staphylococcus_aureus, :Staphylococcus_aureus_USA300, :USA300)
+    if sp1 in sa_set && sp2 in sa_set
+        return true
+    end
+    pa_set = (:pseudomonas_aeruginosa, :Pseudomonas_aeruginosa, :Pseudomonas_aeruginosa_PA14, :Pseudomonas_aeruginosa_PAO1, :PA14, :PAO1)
+    if sp1 in pa_set && sp2 in pa_set
+        return true
+    end
+    return false
+end
+
 struct RegulatoryInteractionEdge
     source_node::String
     target_node::String
@@ -5385,6 +6328,9 @@ struct RegulatoryInteractionEdge
     mechanism_class::Symbol
     evidence_status::Symbol
     citation::String
+    interaction_type::Symbol
+    is_cross_species_bridge::Bool
+    organism_strain::Symbol
 
     function RegulatoryInteractionEdge(;
             source_node::AbstractString,
@@ -5400,15 +6346,20 @@ struct RegulatoryInteractionEdge
             parameter_uncertainty::Tuple{<:Real,<:Real}=(0.10, 1.00),
             mechanism_class::Symbol=:transcriptional,
             evidence_status::Symbol=:calibrated,
-            citation::AbstractString="")
+            citation::AbstractString="",
+            interaction_type::Union{Nothing,Symbol}=nothing,
+            is_cross_species_bridge::Union{Nothing,Bool}=nothing,
+            organism_strain::Union{Nothing,Symbol}=nothing)
         src = String(strip(source_node))
         tgt = String(strip(target_node))
         !isempty(src) && !isempty(tgt) ||
             throw(ArgumentError("source_node and target_node must be non-empty"))
         sign in (:activation, :inhibition, :repression, :catalysis, :degradation) ||
             throw(ArgumentError("sign must be :activation, :inhibition, :repression, :catalysis, or :degradation"))
-        species_scope in (:staphylococcus_aureus, :pseudomonas_aeruginosa, :polymicrobial_shared, :abiotic_environment) ||
-            throw(ArgumentError("invalid species_scope :$species_scope"))
+        species_scope in (
+            :staphylococcus_aureus, :pseudomonas_aeruginosa, :polymicrobial_shared, :abiotic_environment,
+            :Staphylococcus_aureus_USA300, :Pseudomonas_aeruginosa_PA14, :Pseudomonas_aeruginosa_PAO1, :polymicrobial_consortium
+        ) || throw(ArgumentError("invalid species_scope :$species_scope"))
         mechanism_class in (:transcriptional, :post_transcriptional, :chaperone_allosteric,
                             :metabolic_quota, :quorum_quenching, :chemical_effector) ||
             throw(ArgumentError("invalid mechanism_class :$mechanism_class"))
@@ -5429,10 +6380,81 @@ struct RegulatoryInteractionEdge
         u_hi = Float64(parameter_uncertainty[2])
         isfinite(u_lo) && isfinite(u_hi) && u_lo <= u_hi ||
             throw(ArgumentError("parameter_uncertainty must satisfy lower <= upper"))
+
+        is_cross_bridge = if is_cross_species_bridge !== nothing
+            is_cross_species_bridge
+        elseif species_scope in (:polymicrobial_shared, :polymicrobial_consortium)
+            true
+        elseif interaction_type == :polymicrobial_cross_talk
+            true
+        else
+            false
+        end
+
+        itype = if interaction_type !== nothing
+            interaction_type
+        elseif is_cross_bridge || species_scope in (:polymicrobial_shared, :polymicrobial_consortium)
+            :polymicrobial_cross_talk
+        elseif species_scope == :abiotic_environment
+            :abiotic_coupling
+        else
+            :intraspecies_regulation
+        end
+
+        # Structural species separation: cross-species interactions must be explicitly typed
+        is_cross_species_interaction = (prod_sp != :abiotic_environment) &&
+                                       (recv_sp != :abiotic_environment) &&
+                                       !species_matches(prod_sp, recv_sp)
+        if is_cross_species_interaction && !(is_cross_bridge || itype == :polymicrobial_cross_talk)
+            throw(ArgumentError("cross-species interaction between :$prod_sp and :$recv_sp must be explicitly tagged with interaction_type = :polymicrobial_cross_talk or is_cross_species_bridge = true"))
+        end
+
+        ostrain = if organism_strain !== nothing
+            organism_strain
+        elseif species_scope in (:staphylococcus_aureus, :Staphylococcus_aureus_USA300)
+            :Staphylococcus_aureus_USA300
+        elseif species_scope in (:pseudomonas_aeruginosa, :Pseudomonas_aeruginosa_PA14)
+            :Pseudomonas_aeruginosa_PA14
+        elseif species_scope == :Pseudomonas_aeruginosa_PAO1
+            :Pseudomonas_aeruginosa_PAO1
+        elseif species_scope in (:polymicrobial_shared, :polymicrobial_consortium)
+            :polymicrobial_consortium
+        elseif species_scope == :abiotic_environment
+            :unassigned_synthetic
+        else
+            :unassigned_synthetic
+        end
+
+        ostrain in VALID_ORGANISM_STRAINS ||
+            throw(ArgumentError("organism_strain :$ostrain must be one of $(VALID_ORGANISM_STRAINS)"))
+
+        # Enforce biological consistency between species_scope, signal_producer/receiver, and organism_strain
+        if (species_scope in (:staphylococcus_aureus, :Staphylococcus_aureus_USA300) ||
+            (species_matches(prod_sp, :staphylococcus_aureus) && species_matches(recv_sp, :staphylococcus_aureus)))
+            if ostrain in (:pseudomonas_aeruginosa, :Pseudomonas_aeruginosa_PA14, :Pseudomonas_aeruginosa_PAO1,
+                           :Escherichia_coli_UPEC, :Bacillus_subtilis_NCIB3610, :polymicrobial_consortium)
+                throw(ArgumentError("organism_strain :$ostrain is biologically incompatible with Staphylococcus regulation"))
+            end
+        end
+
+        if (species_scope in (:pseudomonas_aeruginosa, :Pseudomonas_aeruginosa_PA14, :Pseudomonas_aeruginosa_PAO1) ||
+            (species_matches(prod_sp, :pseudomonas_aeruginosa) && species_matches(recv_sp, :pseudomonas_aeruginosa)))
+            if ostrain in (:staphylococcus_aureus, :Staphylococcus_aureus_USA300,
+                           :Escherichia_coli_UPEC, :Bacillus_subtilis_NCIB3610, :polymicrobial_consortium)
+                throw(ArgumentError("organism_strain :$ostrain is biologically incompatible with Pseudomonas regulation"))
+            end
+            if (species_scope == :Pseudomonas_aeruginosa_PA14 || prod_sp == :Pseudomonas_aeruginosa_PA14) && ostrain == :Pseudomonas_aeruginosa_PAO1
+                throw(ArgumentError("organism_strain :$ostrain does not match PA14 strain scope"))
+            elseif (species_scope == :Pseudomonas_aeruginosa_PAO1 || prod_sp == :Pseudomonas_aeruginosa_PAO1) && ostrain == :Pseudomonas_aeruginosa_PA14
+                throw(ArgumentError("organism_strain :$ostrain does not match PAO1 strain scope"))
+            end
+        end
+
         new(
             src, tgt, sign, species_scope, String(strip(strain_scope)),
             prod_sp, sig_mol, recv_sp, rec_tgt, env_cond, (u_lo, u_hi),
-            mechanism_class, evidence_status, cit
+            mechanism_class, evidence_status, cit,
+            itype, is_cross_bridge, ostrain
         )
     end
 end
@@ -5444,6 +6466,8 @@ struct RegulatoryNetworkGraph
     nodes::Vector{String}
     edges::Vector{RegulatoryInteractionEdge}
     allow_cross_species_edges::Bool
+    organism_strain::Symbol
+    node_species::Dict{String,Symbol}
 
     function RegulatoryNetworkGraph(;
             graph_id::AbstractString,
@@ -5451,11 +6475,15 @@ struct RegulatoryNetworkGraph
             participating_species::AbstractVector{Symbol}=[primary_species],
             nodes::AbstractVector{<:AbstractString},
             edges::AbstractVector{RegulatoryInteractionEdge},
-            allow_cross_species_edges::Bool=false)
+            allow_cross_species_edges::Bool=false,
+            organism_strain::Union{Nothing,Symbol}=nothing,
+            node_species::Union{Nothing,AbstractDict{<:AbstractString,Symbol}}=nothing)
         gid = String(strip(graph_id))
         !isempty(gid) || throw(ArgumentError("graph_id must be non-empty"))
-        primary_species in (:staphylococcus_aureus, :pseudomonas_aeruginosa, :polymicrobial_co_culture) ||
-            throw(ArgumentError("invalid primary_species :$primary_species"))
+        primary_species in (
+            :staphylococcus_aureus, :pseudomonas_aeruginosa, :polymicrobial_co_culture,
+            :Staphylococcus_aureus_USA300, :Pseudomonas_aeruginosa_PA14, :polymicrobial_consortium
+        ) || throw(ArgumentError("invalid primary_species :$primary_species"))
         nd_list = unique([String(strip(v)) for v in nodes])
         !isempty(nd_list) || throw(ArgumentError("nodes must be non-empty"))
         ed_list = collect(RegulatoryInteractionEdge, edges)
@@ -5464,7 +6492,110 @@ struct RegulatoryNetworkGraph
             (e.source_node in nd_list && e.target_node in nd_list) ||
                 throw(ArgumentError("edge $(e.source_node) -> $(e.target_node) references node not in graph.nodes"))
         end
-        new(gid, primary_species, collect(Symbol, participating_species), nd_list, ed_list, allow_cross_species_edges)
+
+        sa_species = (:staphylococcus_aureus, :Staphylococcus_aureus_USA300)
+        pa_species = (:pseudomonas_aeruginosa, :Pseudomonas_aeruginosa_PA14, :Pseudomonas_aeruginosa_PAO1)
+        poly_species = (:polymicrobial_co_culture, :polymicrobial_consortium)
+
+        is_sa_mono = primary_species in sa_species
+        is_pa_mono = primary_species in pa_species
+        is_poly = primary_species in poly_species || length(participating_species) > 1
+
+        if is_sa_mono
+            foreign_pa = filter(nd -> nd in PA_REGULATORY_MARKER_NODES, nd_list)
+            if !isempty(foreign_pa)
+                throw(ArgumentError("monoculture Staphylococcus graph $gid cannot contain foreign Pseudomonas nodes in node list: $(foreign_pa)"))
+            end
+        elseif is_pa_mono
+            foreign_sa = filter(nd -> nd in SA_REGULATORY_MARKER_NODES, nd_list)
+            if !isempty(foreign_sa)
+                throw(ArgumentError("monoculture Pseudomonas graph $gid cannot contain foreign Staphylococcus nodes in node list: $(foreign_sa)"))
+            end
+        end
+
+        if !allow_cross_species_edges
+            for e in ed_list
+                if e.is_cross_species_bridge || e.interaction_type == :polymicrobial_cross_talk ||
+                   e.species_scope in (:polymicrobial_shared, :polymicrobial_consortium)
+                    throw(ArgumentError("monoculture graph $gid cannot contain cross-species bridge edge $(e.source_node) -> $(e.target_node)"))
+                end
+                if is_sa_mono
+                    if e.species_scope in pa_species || e.organism_strain in pa_species ||
+                       e.mechanism_class == :chaperone_allosteric ||
+                       e.source_node in PA_REGULATORY_MARKER_NODES || e.target_node in PA_REGULATORY_MARKER_NODES
+                        throw(ArgumentError("cannot wire Pseudomonas edge $(e.source_node) -> $(e.target_node) into Staphylococcus monoculture graph (cross-species Chimera rejected)"))
+                    end
+                elseif is_pa_mono
+                    if e.species_scope in sa_species || e.organism_strain in sa_species ||
+                       e.source_node in SA_REGULATORY_MARKER_NODES || e.target_node in SA_REGULATORY_MARKER_NODES
+                        throw(ArgumentError("cannot wire Staphylococcus edge $(e.source_node) -> $(e.target_node) into Pseudomonas monoculture graph (cross-species Chimera rejected)"))
+                    end
+                end
+            end
+        else
+            if !is_poly
+                throw(ArgumentError("monoculture graph $gid cannot enable allow_cross_species_edges without declaring polymicrobial consortium"))
+            end
+            for e in ed_list
+                prod_sp = e.signal_producer
+                recv_sp = e.receiving_species
+                if prod_sp != :abiotic_environment && recv_sp != :abiotic_environment && !species_matches(prod_sp, recv_sp)
+                    if !(e.is_cross_species_bridge || e.interaction_type == :polymicrobial_cross_talk)
+                        throw(ArgumentError("cross-species edge $(e.source_node) -> $(e.target_node) in polymicrobial graph $gid must be explicitly typed as polymicrobial bridge"))
+                    end
+                end
+            end
+        end
+
+        ostrain = if organism_strain !== nothing
+            if is_sa_mono && organism_strain in pa_species
+                throw(ArgumentError("monoculture Staphylococcus graph $gid cannot have Pseudomonas organism_strain :$organism_strain"))
+            elseif is_pa_mono && organism_strain in sa_species
+                throw(ArgumentError("monoculture Pseudomonas graph $gid cannot have Staphylococcus organism_strain :$organism_strain"))
+            end
+            organism_strain
+        elseif is_sa_mono
+            :Staphylococcus_aureus_USA300
+        elseif is_pa_mono
+            :Pseudomonas_aeruginosa_PA14
+        else
+            :polymicrobial_consortium
+        end
+
+        nsp = Dict{String,Symbol}()
+        if node_species !== nothing
+            for (k, v) in node_species
+                k_clean = String(strip(k))
+                if is_sa_mono
+                    if v in pa_species || v in poly_species || k_clean in PA_REGULATORY_MARKER_NODES
+                        throw(ArgumentError("monoculture Staphylococcus graph $gid cannot contain foreign Pseudomonas species or node in node_species: $k_clean => $v"))
+                    end
+                elseif is_pa_mono
+                    if v in sa_species || v in poly_species || k_clean in SA_REGULATORY_MARKER_NODES
+                        throw(ArgumentError("monoculture Pseudomonas graph $gid cannot contain foreign Staphylococcus species or node in node_species: $k_clean => $v"))
+                    end
+                end
+                nsp[k_clean] = v
+            end
+        else
+            for nd in nd_list
+                if is_sa_mono
+                    nsp[nd] = :Staphylococcus_aureus_USA300
+                elseif is_pa_mono
+                    nsp[nd] = :Pseudomonas_aeruginosa_PA14
+                else
+                    if nd in SA_REGULATORY_MARKER_NODES
+                        nsp[nd] = :Staphylococcus_aureus_USA300
+                    elseif nd in PA_REGULATORY_MARKER_NODES
+                        nsp[nd] = :Pseudomonas_aeruginosa_PA14
+                    else
+                        nsp[nd] = :polymicrobial_consortium
+                    end
+                end
+            end
+        end
+
+        new(gid, primary_species, collect(Symbol, participating_species), nd_list, ed_list, allow_cross_species_edges, ostrain, nsp)
     end
 end
 
@@ -5476,7 +6607,7 @@ enforcing explicit species/strain separation unless `include_polymicrobial_cross
 function build_species_regulatory_network(
         species::Symbol=:staphylococcus_aureus;
         include_polymicrobial_crosstalk::Bool=false)
-    if species == :staphylococcus_aureus && !include_polymicrobial_crosstalk
+    if (species in (:staphylococcus_aureus, :Staphylococcus_aureus_USA300)) && !include_polymicrobial_crosstalk
         nodes = [
             "Extracellular_Nutrient_N", "Intracellular_Quota_Q", "AIP_I", "AgrC_AgrA",
             "RNAIII", "alpha_PSM", "EV_Biogenesis", "FruA_FruK_Fructose_Flux",
@@ -5490,7 +6621,9 @@ function build_species_regulatory_network(
                 receiving_species=:staphylococcus_aureus, receptor_target="PTS_Permease_Quota_Pool",
                 environmental_conditions="37C_pH7.2_nutrient_limited", parameter_uncertainty=(0.20, 0.80),
                 mechanism_class=:metabolic_quota, evidence_status=:calibrated,
-                citation="Droop (1973) & mBio Oct 2026: intracellular quota replenishment"
+                citation="Droop (1973) & mBio Oct 2026: intracellular quota replenishment",
+                interaction_type=:intraspecies_regulation, is_cross_species_bridge=false,
+                organism_strain=:Staphylococcus_aureus_USA300
             ),
             RegulatoryInteractionEdge(
                 source_node="AIP_I", target_node="AgrC_AgrA",
@@ -5499,7 +6632,9 @@ function build_species_regulatory_network(
                 receiving_species=:staphylococcus_aureus, receptor_target="AgrC_histidine_kinase",
                 environmental_conditions="37C_pH7.0_neutral_biofilm", parameter_uncertainty=(0.15, 0.75),
                 mechanism_class=:transcriptional, evidence_status=:observed,
-                citation="mBio Oct 2026: S. aureus agr two-component autoinducer sensing"
+                citation="mBio Oct 2026: S. aureus agr two-component autoinducer sensing",
+                interaction_type=:intraspecies_regulation, is_cross_species_bridge=false,
+                organism_strain=:Staphylococcus_aureus_USA300
             ),
             RegulatoryInteractionEdge(
                 source_node="AgrC_AgrA", target_node="RNAIII",
@@ -5508,7 +6643,9 @@ function build_species_regulatory_network(
                 receiving_species=:staphylococcus_aureus, receptor_target="P3_RNAIII_promoter",
                 environmental_conditions="37C_pH7.0_low_ROS", parameter_uncertainty=(0.50, 1.00),
                 mechanism_class=:transcriptional, evidence_status=:observed,
-                citation="mBio Oct 2026: AgrA P3 promoter activation of RNAIII"
+                citation="mBio Oct 2026: AgrA P3 promoter activation of RNAIII",
+                interaction_type=:intraspecies_regulation, is_cross_species_bridge=false,
+                organism_strain=:Staphylococcus_aureus_USA300
             ),
             RegulatoryInteractionEdge(
                 source_node="AgrC_AgrA", target_node="alpha_PSM",
@@ -5517,7 +6654,9 @@ function build_species_regulatory_network(
                 receiving_species=:staphylococcus_aureus, receptor_target="psm_alpha_operon_promoter",
                 environmental_conditions="37C_nutrient_and_oxidative_stress", parameter_uncertainty=(0.40, 1.00),
                 mechanism_class=:transcriptional, evidence_status=:observed,
-                citation="mBio Oct 2026: direct AgrA activation of psm-alpha independent of RNAIII under stress"
+                citation="mBio Oct 2026: direct AgrA activation of psm-alpha independent of RNAIII under stress",
+                interaction_type=:intraspecies_regulation, is_cross_species_bridge=false,
+                organism_strain=:Staphylococcus_aureus_USA300
             ),
             RegulatoryInteractionEdge(
                 source_node="alpha_PSM", target_node="EV_Biogenesis",
@@ -5526,7 +6665,9 @@ function build_species_regulatory_network(
                 receiving_species=:staphylococcus_aureus, receptor_target="Cytoplasmic_Membrane_Lipid_Packing",
                 environmental_conditions="37C_peptidoglycan_crosslinking_reduced", parameter_uncertainty=(1.0e6, 1.0e7),
                 mechanism_class=:post_transcriptional, evidence_status=:observed,
-                citation="mBio Oct 2026: alpha-PSM surfactant membrane turgor release of S. aureus EVs"
+                citation="mBio Oct 2026: alpha-PSM surfactant membrane turgor release of S. aureus EVs",
+                interaction_type=:intraspecies_regulation, is_cross_species_bridge=false,
+                organism_strain=:Staphylococcus_aureus_USA300
             ),
             RegulatoryInteractionEdge(
                 source_node="FruA_FruK_Fructose_Flux", target_node="Vancomycin_Tolerant_Subpop",
@@ -5535,7 +6676,9 @@ function build_species_regulatory_network(
                 receiving_species=:staphylococcus_aureus, receptor_target="Cell_Wall_Peptidoglycan_Precursor_Pathway",
                 environmental_conditions="37C_biofilm_fructose_niche_vancomycin_exposure", parameter_uncertainty=(0.15, 0.65),
                 mechanism_class=:metabolic_quota, evidence_status=:observed,
-                citation="ISME J Oct 2026: clonal S. aureus fruA/fruK fructose uptake drives cell-wall thickening and vancomycin tolerance"
+                citation="ISME J Oct 2026: clonal S. aureus fruA/fruK fructose uptake drives cell-wall thickening and vancomycin tolerance",
+                interaction_type=:intraspecies_regulation, is_cross_species_bridge=false,
+                organism_strain=:Staphylococcus_aureus_USA300
             ),
         ]
         return RegulatoryNetworkGraph(
@@ -5544,9 +6687,10 @@ function build_species_regulatory_network(
             participating_species = [:staphylococcus_aureus],
             nodes = nodes,
             edges = edges,
-            allow_cross_species_edges = false
+            allow_cross_species_edges = false,
+            organism_strain = :Staphylococcus_aureus_USA300
         )
-    elseif species == :pseudomonas_aeruginosa && !include_polymicrobial_crosstalk
+    elseif (species in (:pseudomonas_aeruginosa, :Pseudomonas_aeruginosa_PA14)) && !include_polymicrobial_crosstalk
         nodes = [
             "Extracellular_Nutrient_N", "Intracellular_Quota_Q", "3OC12_HSL", "LasI_LasR",
             "C4_HSL", "PqsE_Chaperone", "RhlR_Regulon", "Pyocyanin_HQNO_Effector"
@@ -5559,7 +6703,9 @@ function build_species_regulatory_network(
                 receiving_species=:pseudomonas_aeruginosa, receptor_target="LasR_transcriptional_regulator",
                 environmental_conditions="37C_pH6.8_to_7.4", parameter_uncertainty=(0.10, 0.90),
                 mechanism_class=:transcriptional, evidence_status=:observed,
-                citation="Critical Reviews in Microbiology Oct 2026: canonical LasI/LasR acyl-HSL circuit"
+                citation="Critical Reviews in Microbiology Oct 2026: canonical LasI/LasR acyl-HSL circuit",
+                interaction_type=:intraspecies_regulation, is_cross_species_bridge=false,
+                organism_strain=:Pseudomonas_aeruginosa_PA14
             ),
             RegulatoryInteractionEdge(
                 source_node="PqsE_Chaperone", target_node="RhlR_Regulon",
@@ -5568,7 +6714,9 @@ function build_species_regulatory_network(
                 receiving_species=:pseudomonas_aeruginosa, receptor_target="RhlR_dimer_complex",
                 environmental_conditions="37C_biofilm_high_density", parameter_uncertainty=(0.25, 1.50),
                 mechanism_class=:chaperone_allosteric, evidence_status=:observed,
-                citation="P. aeruginosa PqsE-RhlR physical complex allosteric activation"
+                citation="P. aeruginosa PqsE-RhlR physical complex allosteric activation",
+                interaction_type=:intraspecies_regulation, is_cross_species_bridge=false,
+                organism_strain=:Pseudomonas_aeruginosa_PA14
             ),
             RegulatoryInteractionEdge(
                 source_node="C4_HSL", target_node="RhlR_Regulon",
@@ -5577,7 +6725,9 @@ function build_species_regulatory_network(
                 receiving_species=:pseudomonas_aeruginosa, receptor_target="RhlR_ligand_pocket",
                 environmental_conditions="37C_pH6.8_to_7.4", parameter_uncertainty=(0.20, 1.20),
                 mechanism_class=:transcriptional, evidence_status=:observed,
-                citation="P. aeruginosa C4-HSL activation of RhlR"
+                citation="P. aeruginosa C4-HSL activation of RhlR",
+                interaction_type=:intraspecies_regulation, is_cross_species_bridge=false,
+                organism_strain=:Pseudomonas_aeruginosa_PA14
             ),
             RegulatoryInteractionEdge(
                 source_node="RhlR_Regulon", target_node="Pyocyanin_HQNO_Effector",
@@ -5586,7 +6736,9 @@ function build_species_regulatory_network(
                 receiving_species=:pseudomonas_aeruginosa, receptor_target="phzA1_pqsABCD_operons",
                 environmental_conditions="37C_microaerobic_biofilm", parameter_uncertainty=(0.15, 0.85),
                 mechanism_class=:transcriptional, evidence_status=:observed,
-                citation="Critical Reviews in Microbiology Oct 2026: RhlR/PQS control of HQNO and phenazine synthesis"
+                citation="Critical Reviews in Microbiology Oct 2026: RhlR/PQS control of HQNO and phenazine synthesis",
+                interaction_type=:intraspecies_regulation, is_cross_species_bridge=false,
+                organism_strain=:Pseudomonas_aeruginosa_PA14
             ),
         ]
         return RegulatoryNetworkGraph(
@@ -5595,9 +6747,10 @@ function build_species_regulatory_network(
             participating_species = [:pseudomonas_aeruginosa],
             nodes = nodes,
             edges = edges,
-            allow_cross_species_edges = false
+            allow_cross_species_edges = false,
+            organism_strain = :Pseudomonas_aeruginosa_PA14
         )
-    elseif species == :polymicrobial_co_culture || include_polymicrobial_crosstalk
+    elseif (species in (:polymicrobial_co_culture, :polymicrobial_consortium)) || include_polymicrobial_crosstalk
         sa_graph = build_species_regulatory_network(:staphylococcus_aureus; include_polymicrobial_crosstalk=false)
         pa_graph = build_species_regulatory_network(:pseudomonas_aeruginosa; include_polymicrobial_crosstalk=false)
         nodes = unique(vcat(sa_graph.nodes, pa_graph.nodes, ["Alkaline_pH_Lactonolysis"]))
@@ -5609,7 +6762,9 @@ function build_species_regulatory_network(
                 receiving_species=:staphylococcus_aureus, receptor_target="AgrC_Membrane_Respiratory_Chain",
                 environmental_conditions="37C_polymicrobial_wound_or_flowcell", parameter_uncertainty=(0.20, 0.80),
                 mechanism_class=:chemical_effector, evidence_status=:observed,
-                citation="Critical Reviews in Microbiology Oct 2026: Mode 2 chemical-effector inhibition of S. aureus agr by P. aeruginosa HQNO/pyocyanin"
+                citation="Critical Reviews in Microbiology Oct 2026: Mode 2 chemical-effector inhibition of S. aureus agr by P. aeruginosa HQNO/pyocyanin",
+                interaction_type=:polymicrobial_cross_talk, is_cross_species_bridge=true,
+                organism_strain=:polymicrobial_consortium
             ),
             RegulatoryInteractionEdge(
                 source_node="Alkaline_pH_Lactonolysis", target_node="3OC12_HSL",
@@ -5618,7 +6773,9 @@ function build_species_regulatory_network(
                 receiving_species=:pseudomonas_aeruginosa, receptor_target="3OC12_HSL_Homoserine_Lactone_Ring",
                 environmental_conditions="pH_gt_7.5_alkaline_microenvironment", parameter_uncertainty=(0.10, 0.55),
                 mechanism_class=:quorum_quenching, evidence_status=:observed,
-                citation="Critical Reviews in Microbiology Oct 2026: Mode 3 alkaline pH AHL lactonolysis above pH 7.5"
+                citation="Critical Reviews in Microbiology Oct 2026: Mode 3 alkaline pH AHL lactonolysis above pH 7.5",
+                interaction_type=:polymicrobial_cross_talk, is_cross_species_bridge=true,
+                organism_strain=:polymicrobial_consortium
             ),
         ]
         return RegulatoryNetworkGraph(
@@ -5627,7 +6784,8 @@ function build_species_regulatory_network(
             participating_species = [:staphylococcus_aureus, :pseudomonas_aeruginosa],
             nodes = nodes,
             edges = vcat(sa_graph.edges, pa_graph.edges, cross_edges),
-            allow_cross_species_edges = true
+            allow_cross_species_edges = true,
+            organism_strain = :polymicrobial_consortium
         )
     else
         throw(ArgumentError("unsupported species :$species in build_species_regulatory_network"))
@@ -5647,28 +6805,76 @@ function validate_regulatory_network_applicability(
     violations = String[]
     cross_cnt = 0
 
+    sa_species = (:staphylococcus_aureus, :Staphylococcus_aureus_USA300)
+    pa_species = (:pseudomonas_aeruginosa, :Pseudomonas_aeruginosa_PA14, :Pseudomonas_aeruginosa_PAO1)
+    poly_species = (:polymicrobial_co_culture, :polymicrobial_consortium)
+
     for e in graph.edges
-        if e.species_scope == :polymicrobial_shared
+        if e.species_scope in (:polymicrobial_shared, :polymicrobial_consortium) || e.is_cross_species_bridge
             cross_cnt += 1
             if !graph.allow_cross_species_edges
                 push!(violations, "cross_species_edge_in_monoculture_graph:$(e.source_node)->$(e.target_node)")
             end
-        elseif e.species_scope in (:staphylococcus_aureus, :pseudomonas_aeruginosa)
-            if !(e.species_scope in graph.participating_species)
+        elseif e.species_scope in (:staphylococcus_aureus, :pseudomonas_aeruginosa, :Staphylococcus_aureus_USA300, :Pseudomonas_aeruginosa_PA14)
+            in_part = false
+            for p in graph.participating_species
+                if species_matches(e.species_scope, p)
+                    in_part = true
+                    break
+                end
+            end
+            if !in_part
                 push!(violations, "edge_species_not_in_participating_species:$(e.species_scope)")
             end
         end
     end
 
+    # Audit graph nodes, node_species, and organism_strain against requested species
+    if requested_species in sa_species
+        for nd in graph.nodes
+            if nd in PA_REGULATORY_MARKER_NODES
+                push!(violations, "foreign_pseudomonas_node_in_staphylococcus_graph:$nd")
+            end
+        end
+        for (nd, sp) in graph.node_species
+            if sp in pa_species
+                push!(violations, "foreign_pseudomonas_node_species_in_staphylococcus_graph:$nd:$sp")
+            end
+            if nd in PA_REGULATORY_MARKER_NODES
+                push!(violations, "foreign_pseudomonas_node_in_node_species:$nd")
+            end
+        end
+        if graph.organism_strain in pa_species
+            push!(violations, "foreign_pseudomonas_strain_in_staphylococcus_graph:$(graph.organism_strain)")
+        end
+    elseif requested_species in pa_species
+        for nd in graph.nodes
+            if nd in SA_REGULATORY_MARKER_NODES
+                push!(violations, "foreign_staphylococcus_node_in_pseudomonas_graph:$nd")
+            end
+        end
+        for (nd, sp) in graph.node_species
+            if sp in sa_species
+                push!(violations, "foreign_staphylococcus_node_species_in_pseudomonas_graph:$nd:$sp")
+            end
+            if nd in SA_REGULATORY_MARKER_NODES
+                push!(violations, "foreign_staphylococcus_node_in_node_species:$nd")
+            end
+        end
+        if graph.organism_strain in sa_species
+            push!(violations, "foreign_staphylococcus_strain_in_pseudomonas_graph:$(graph.organism_strain)")
+        end
+    end
+
     topo_id = params.topology.topology_id
-    if requested_species == :staphylococcus_aureus
+    if requested_species in sa_species
         if topo_id != :staphylococcus_agr_rnaiii_psm
             push!(violations, "pseudomonas_topology_applied_to_staphylococcus_monoculture")
         end
         if params.topology.pqse_chaperone_coupling > 0.0
             push!(violations, "pseudomonas_pqse_chaperone_coupling_nonzero_in_staphylococcus")
         end
-    elseif requested_species == :pseudomonas_aeruginosa
+    elseif requested_species in pa_species
         if !(topo_id in (:pseudomonas_pqse_rhlr, :pseudomonas_lasi_lasr))
             push!(violations, "staphylococcus_agr_topology_applied_to_pseudomonas_monoculture")
         end
@@ -5700,42 +6906,112 @@ struct DroopQuotaMassBalanceAudit
     max_relative_conservation_error::Float64
     quota_bounds_respected::Bool
     mass_conserved::Bool
+    growth_dilution_rates::Vector{Float64}
+    uptake_rates::Vector{Float64}
+    growth_rates::Vector{Float64}
+
+    function DroopQuotaMassBalanceAudit(
+            times_h, extracellular_nutrient_mm, intracellular_quota_mmol_gdw,
+            biomass_gdw_l, total_nutrient_inventory_mm, initial_inventory_mm,
+            final_inventory_mm, max_relative_conservation_error,
+            quota_bounds_respected, mass_conserved,
+            growth_dilution_rates=zeros(Float64, length(times_h)),
+            uptake_rates=zeros(Float64, length(times_h)),
+            growth_rates=zeros(Float64, length(times_h)))
+        new(
+            collect(Float64, times_h),
+            collect(Float64, extracellular_nutrient_mm),
+            collect(Float64, intracellular_quota_mmol_gdw),
+            collect(Float64, biomass_gdw_l),
+            collect(Float64, total_nutrient_inventory_mm),
+            Float64(initial_inventory_mm),
+            Float64(final_inventory_mm),
+            Float64(max_relative_conservation_error),
+            Bool(quota_bounds_respected),
+            Bool(mass_conserved),
+            collect(Float64, growth_dilution_rates),
+            collect(Float64, uptake_rates),
+            collect(Float64, growth_rates)
+        )
+    end
 end
 
 """
-Audit closed-system Droop intracellular nutrient quota mass conservation (M6.4 Gate G4):
-  dN/dt = -v_up(N, Q) X(t)
-  dX/dt = mu(Q) X(t)
-  dQ/dt = v_up(N, Q) - mu(Q) Q(t)
-verifying that extracellular uptake, intracellular quota replenishment, and
-growth-dilution `-mu(Q)*Q` preserve total limiting-element inventory
-`I(t) = N(t) + Q(t)*X(t) = const` to machine precision while keeping `Q(t) in [Q_min, Q_max]`.
+Auditable Droop intracellular nutrient quota model (Milestone M3 / Requirement R4.2).
+Models uncoupled extracellular nutrient uptake and intracellular quota-driven biomass growth:
+  dN/dt = -rho(N, Q) * X
+  dX/dt = mu(Q) * X
+  dQ/dt = rho(N, Q) - mu(Q) * Q
+where growth dilution -mu(Q)*Q strictly accounts for quota dilution by expanding cell volume,
+preserving total limiting-element mass balance N(t) + Q(t)*X(t) = const in closed batch systems.
 """
-function audit_droop_quota_conservation(;
+struct DroopCellQuotaModel
+    model_id::String
+    organism_strain::Symbol
+    min_quota_mmol_gdw::Float64         # Subsistence quota Q_min [mmol / g_DW]
+    max_quota_mmol_gdw::Float64         # Maximum storage quota Q_max [mmol / g_DW]
+    max_uptake_rate_mmol_gdw_h::Float64 # Maximum nutrient uptake rate rho_max [mmol / (g_DW * h)]
+    half_saturation_mm::Float64         # Monod affinity constant K_s [mM = mol / m^3]
+    max_growth_rate_h::Float64          # Maximum specific growth rate mu_max [1 / h]
+    yield_biomass_per_quota::Float64    # Yield coefficient Y_X/Q [dimensionless or g_DW / mmol]
+
+    function DroopCellQuotaModel(;
+            model_id::AbstractString="DROOP-MODEL-01",
+            organism_strain::Symbol=:Staphylococcus_aureus_USA300,
+            min_quota_mmol_gdw::Real=0.22,
+            max_quota_mmol_gdw::Real=1.20,
+            max_uptake_rate_mmol_gdw_h::Real=0.45,
+            half_saturation_mm::Real=0.80,
+            max_growth_rate_h::Real=0.35,
+            yield_biomass_per_quota::Real=1.0)
+        mid = String(strip(model_id))
+        !isempty(mid) || throw(ArgumentError("model_id must be non-empty"))
+        organism_strain in VALID_ORGANISM_STRAINS ||
+            throw(ArgumentError("organism_strain :$organism_strain must be one of $(VALID_ORGANISM_STRAINS)"))
+        qmin = Float64(min_quota_mmol_gdw)
+        qmax = Float64(max_quota_mmol_gdw)
+        vmax = Float64(max_uptake_rate_mmol_gdw_h)
+        ks   = Float64(half_saturation_mm)
+        mum  = Float64(max_growth_rate_h)
+        yb   = Float64(yield_biomass_per_quota)
+        0.0 < qmin < qmax || throw(ArgumentError("min_quota must satisfy 0 < min_quota < max_quota"))
+        vmax > 0.0 || throw(ArgumentError("max_uptake_rate must be positive"))
+        ks > 0.0 || throw(ArgumentError("half_saturation must be positive"))
+        mum > 0.0 || throw(ArgumentError("max_growth_rate must be positive"))
+        yb > 0.0 || throw(ArgumentError("yield_biomass_per_quota must be positive"))
+        new(mid, organism_strain, qmin, qmax, vmax, ks, mum, yb)
+    end
+end
+
+"""
+Simulate transient Droop intracellular quota dynamics in a closed batch system over `times_h`.
+Integrates:
+  dN/dt = -rho(N, Q) * X
+  dX/dt = mu(Q) * X
+  dQ/dt = rho(N, Q) - mu(Q) * Q
+recording the explicit growth-dilution rate -mu(Q)*Q(t) and verifying exact limiting-element
+conservation N(t) + Q(t)*X(t) = const to machine precision (< 1e-12).
+"""
+function simulate_droop_quota_dynamics(
+        model::DroopCellQuotaModel;
         initial_nutrient_mm::Real=5.0,
         initial_quota_mmol_gdw::Real=0.60,
         initial_biomass_gdw_l::Real=0.50,
-        min_quota_mmol_gdw::Real=0.22,
-        max_quota_mmol_gdw::Real=1.20,
-        max_uptake_rate_mmol_gdw_h::Real=0.45,
-        half_saturation_mm::Real=0.80,
-        max_growth_rate_h::Real=0.35,
         times_h::AbstractVector{<:Real}=collect(0.0:0.5:12.0),
-        dt_substep_h::Real=0.01,
-        tolerance::Real=1e-12)
+        dt_substep_h::Real=0.01)
     N0 = Float64(initial_nutrient_mm)
     Q0 = Float64(initial_quota_mmol_gdw)
     X0 = Float64(initial_biomass_gdw_l)
-    Qmin = Float64(min_quota_mmol_gdw)
-    Qmax = Float64(max_quota_mmol_gdw)
-    Vmax = Float64(max_uptake_rate_mmol_gdw_h)
-    Ks = Float64(half_saturation_mm)
-    mu_max = Float64(max_growth_rate_h)
+    Qmin = model.min_quota_mmol_gdw
+    Qmax = model.max_quota_mmol_gdw
+    Vmax = model.max_uptake_rate_mmol_gdw_h
+    Ks = model.half_saturation_mm
+    mu_max = model.max_growth_rate_h
     dt_sub = Float64(dt_substep_h)
-    tol = Float64(tolerance)
-    N0 >= 0 && X0 > 0 && (0.0 < Qmin <= Q0 <= Qmax) && Vmax >= 0 && Ks > 0 && mu_max >= 0 &&
-        !isempty(times_h) && issorted(times_h) && first(times_h) >= 0 && dt_sub > 0 && tol > 0 ||
-        throw(ArgumentError("invalid parameters in audit_droop_quota_conservation"))
+
+    N0 >= 0 && X0 > 0 && (0.0 < Qmin <= Q0 <= Qmax) && dt_sub > 0 &&
+        !isempty(times_h) && issorted(times_h) && first(times_h) >= 0 ||
+        throw(ArgumentError("invalid initial conditions or parameters in simulate_droop_quota_dynamics"))
 
     n_snaps = length(times_h)
     t_out = Float64.(times_h)
@@ -5743,6 +7019,9 @@ function audit_droop_quota_conservation(;
     Q_vec = zeros(Float64, n_snaps)
     X_vec = zeros(Float64, n_snaps)
     inv_vec = zeros(Float64, n_snaps)
+    growth_dilution_vec = zeros(Float64, n_snaps)
+    uptake_rate_vec = zeros(Float64, n_snaps)
+    growth_rate_vec = zeros(Float64, n_snaps)
 
     N = N0
     Q = Q0
@@ -5754,41 +7033,123 @@ function audit_droop_quota_conservation(;
     for (idx, t_target) in enumerate(t_out)
         while t_cur < t_target - 1e-12
             dt = min(dt_sub, t_target - t_cur)
-            # Conservative flux-limited uptake and growth step preserving N + Q*X = inv0 identically
             monod = N / (N + Ks)
             quota_cap = clamp((Qmax - Q) / max(Qmax - Qmin, 1e-12), 0.0, 1.0)
-            v_up_raw = Vmax * monod * quota_cap
-            # Flux limiter so uptake over dt cannot exceed available N or remaining quota capacity
-            dN_up = min(N, v_up_raw * X * dt)
+            rho_raw = Vmax * monod * quota_cap
+
             mu_q = mu_max * max(0.0, 1.0 - Qmin / max(Q, Qmin))
 
-            N_next = N - dN_up
+            delta_N = min(N, rho_raw * X * dt, max(0.0, Qmax - Q) * X)
+
+            N_next = N - delta_N
             X_next = X * exp(mu_q * dt)
-            # Intracellular pool P = Q * X advances by +dN_up exactly, so Q_next = (Q*X + dN_up) / X_next
-            P_next = Q * X + dN_up
+            P_next = Q * X + delta_N
             Q_next = P_next / X_next
 
             if !(Qmin - 1e-9 <= Q_next <= Qmax + 1e-9) || N_next < -1e-12 || X_next <= 0.0
                 bounds_ok = false
             end
+
             N = max(0.0, N_next)
             X = X_next
             Q = Q_next
             t_cur += dt
         end
+
+        mu_snap = mu_max * max(0.0, 1.0 - Qmin / max(Q, Qmin))
+        monod_snap = N / (N + Ks)
+        cap_snap = clamp((Qmax - Q) / max(Qmax - Qmin, 1e-12), 0.0, 1.0)
+        rho_snap = Vmax * monod_snap * cap_snap
+
         N_vec[idx] = N
         Q_vec[idx] = Q
         X_vec[idx] = X
         inv_vec[idx] = N + Q * X
+        growth_dilution_vec[idx] = -mu_snap * Q
+        uptake_rate_vec[idx] = rho_snap
+        growth_rate_vec[idx] = mu_snap
     end
 
     max_rel_err = maximum(abs.(inv_vec .- inv0)) / max(inv0, 1e-15)
-    return DroopQuotaMassBalanceAudit(
-        t_out, N_vec, Q_vec, X_vec, inv_vec,
-        inv0, inv_vec[end], max_rel_err,
-        bounds_ok, max_rel_err <= tol && bounds_ok
+    return (
+        times_h = t_out,
+        extracellular_nutrient_mm = N_vec,
+        intracellular_quota_mmol_gdw = Q_vec,
+        biomass_gdw_l = X_vec,
+        total_nutrient_inventory_mm = inv_vec,
+        growth_dilution_rates = growth_dilution_vec,
+        uptake_rates = uptake_rate_vec,
+        growth_rates = growth_rate_vec,
+        initial_inventory_mm = inv0,
+        final_inventory_mm = inv_vec[end],
+        max_relative_conservation_error = max_rel_err,
+        quota_bounds_respected = bounds_ok,
+        mass_conserved = (max_rel_err <= 1e-12) && bounds_ok
     )
 end
+
+"""
+Audit closed-system Droop intracellular nutrient quota mass conservation (Milestone M3 / Requirement R4.2):
+  dN/dt = -rho(N, Q) * X
+  dX/dt = mu(Q) * X
+  dQ/dt = rho(N, Q) - mu(Q) * Q
+verifying that extracellular uptake, intracellular quota replenishment, and
+growth-dilution `-mu(Q)*Q` preserve total limiting-element inventory
+`N(t) + Q(t)*X(t) = const` to machine precision (< 1e-12) while keeping `Q(t) in [Q_min, Q_max]`.
+"""
+function audit_droop_mass_conservation(;
+        model::Union{Nothing,DroopCellQuotaModel}=nothing,
+        initial_nutrient_mm::Real=5.0,
+        initial_quota_mmol_gdw::Real=0.60,
+        initial_biomass_gdw_l::Real=0.50,
+        min_quota_mmol_gdw::Real=0.22,
+        max_quota_mmol_gdw::Real=1.20,
+        max_uptake_rate_mmol_gdw_h::Real=0.45,
+        half_saturation_mm::Real=0.80,
+        max_growth_rate_h::Real=0.35,
+        times_h::AbstractVector{<:Real}=collect(0.0:0.5:12.0),
+        dt_substep_h::Real=0.01,
+        tolerance::Real=1e-12)
+    m = model === nothing ? DroopCellQuotaModel(
+        min_quota_mmol_gdw = min_quota_mmol_gdw,
+        max_quota_mmol_gdw = max_quota_mmol_gdw,
+        max_uptake_rate_mmol_gdw_h = max_uptake_rate_mmol_gdw_h,
+        half_saturation_mm = half_saturation_mm,
+        max_growth_rate_h = max_growth_rate_h
+    ) : model
+
+    sim = simulate_droop_quota_dynamics(
+        m;
+        initial_nutrient_mm = initial_nutrient_mm,
+        initial_quota_mmol_gdw = initial_quota_mmol_gdw,
+        initial_biomass_gdw_l = initial_biomass_gdw_l,
+        times_h = times_h,
+        dt_substep_h = dt_substep_h
+    )
+
+    is_conserved = sim.max_relative_conservation_error <= Float64(tolerance) && sim.quota_bounds_respected
+
+    return DroopQuotaMassBalanceAudit(
+        sim.times_h,
+        sim.extracellular_nutrient_mm,
+        sim.intracellular_quota_mmol_gdw,
+        sim.biomass_gdw_l,
+        sim.total_nutrient_inventory_mm,
+        sim.initial_inventory_mm,
+        sim.final_inventory_mm,
+        sim.max_relative_conservation_error,
+        sim.quota_bounds_respected,
+        is_conserved,
+        sim.growth_dilution_rates,
+        sim.uptake_rates,
+        sim.growth_rates
+    )
+end
+
+"""
+Audit closed-system Droop intracellular nutrient quota mass conservation (backwards-compatible alias).
+"""
+audit_droop_quota_conservation(; kwargs...) = audit_droop_mass_conservation(; kwargs...)
 
 # ---------------------------------------------------------------------------
 # Milestone M6.5: Controlled Ablation Matrix (R0..R5 + Pairwise) & Validation Ladder (G0..G5)
@@ -5797,16 +7158,17 @@ end
 """
 Execute the M6.5 controlled ablation matrix across the 5 core M3/M4 mechanistic
 hypothesis modules:
-- `R0`: Baseline (all 5 hypothesis switches off)
-- `R1`: PGA/EPS swelling & wrinkling mechanics only
-- `R2`: Heterogeneous curli/electrostatic matrix diffusion only
-- `R3`: Droop intracellular nutrient quota only
-- `R4`: Nutrient/oxidative-stress decoupled RNAIII vs alpha-PSM EV biogenesis only
-- `R5`: Electrokinetic/ROS AHL degradation & polymicrobial QS crosstalk only
-- `R_ij`: All 10 pairwise module combinations (`1 <= i < j <= 5`)
-- `R_full`: All modules active
+- `R0`: Baseline (all 5 hypothesis switches off in knock-in mode, or all on in knock-out mode)
+- `R1`: PGA/EPS swelling and wrinkling mechanics
+- `R2`: Heterogeneous curli/electrostatic matrix diffusion
+- `R3`: Droop intracellular nutrient quota
+- `R4`: Nutrient/oxidative-stress decoupled RNAIII vs alpha-PSM EV biogenesis
+- `R5`: Electrokinetic/ROS AHL degradation and polymicrobial QS crosstalk
+- `R_ij`: All 10 pairwise module combinations (1 <= i < j <= 5)
+- `R_full`: All modules active (in knock-in mode) or `R_null` (in knock-out mode)
 reporting main effects `Delta_i`, pairwise interaction effects
-`Delta_ij = Y_ij - Y_i - Y_j + Y_0`, and first-order sensitivity indices.
+`Delta_ij`, first-order sensitivity indices, pairwise sensitivity indices, and total-order sensitivity indices.
+Supports `mode=:knock_in` (default) and `mode=:knock_out`.
 """
 function run_biofilm_ablation_matrix(;
         comp::BiofilmMatrixComposition=BiofilmMatrixComposition(
@@ -5821,7 +7183,10 @@ function run_biofilm_ablation_matrix(;
             oxidative_stress_index=1.2, fructose_flux_index=1.6, vancomycin_exposure_ug_ml=4.0
         ),
         ek_spec::ElectrokineticQSSpec=ElectrokineticQSSpec(electric_field_v_m=1800.0),
-        ct_spec::PolymicrobialCrosstalkSpec=PolymicrobialCrosstalkSpec())
+        ct_spec::PolymicrobialCrosstalkSpec=PolymicrobialCrosstalkSpec(),
+        mode::Symbol=:knock_in)
+
+    mode in (:knock_in, :knock_out) || throw(ArgumentError("Unknown mode $(mode), must be :knock_in or :knock_out"))
 
     make_switches(active_indices::Tuple) = BiofilmHypothesisSwitches(
         enable_pga_swelling_mechanics = (1 in active_indices),
@@ -5868,45 +7233,134 @@ function run_biofilm_ablation_matrix(;
     end
 
     runs = Dict{Symbol,NamedTuple}()
-    runs[:R0] = eval_config(())
-    for i in 1:5
-        runs[Symbol("R$i")] = eval_config((i,))
-    end
-    for i in 1:4, j in (i + 1):5
-        runs[Symbol("R$(i)$(j)")] = eval_config((i, j))
-    end
-    runs[:R_full] = eval_config((1, 2, 3, 4, 5))
-
-    y0 = runs[:R0].composite_response
     main_effects = Dict{Symbol,Float64}()
-    for i in 1:5
-        main_effects[Symbol("R$i")] = runs[Symbol("R$i")].composite_response - y0
-    end
-
     pairwise_interactions = Dict{Tuple{Symbol,Symbol},Float64}()
-    for i in 1:4, j in (i + 1):5
-        ri = Symbol("R$i")
-        rj = Symbol("R$j")
-        rij = Symbol("R$(i)$(j)")
-        # Epistatic/synergistic interaction Delta_ij = Y_ij - Y_i - Y_j + Y_0
-        pairwise_interactions[(ri, rj)] = runs[rij].composite_response -
-            runs[ri].composite_response - runs[rj].composite_response + y0
+
+    if mode === :knock_in
+        runs[:R0] = eval_config(())
+        for i in 1:5
+            runs[Symbol("R$i")] = eval_config((i,))
+        end
+        for i in 1:4, j in (i + 1):5
+            runs[Symbol("R$(i)$(j)")] = eval_config((i, j))
+        end
+        runs[:R_full] = eval_config((1, 2, 3, 4, 5))
+
+        y0 = runs[:R0].composite_response
+        for i in 1:5
+            main_effects[Symbol("R$i")] = runs[Symbol("R$i")].composite_response - y0
+        end
+
+        for i in 1:4, j in (i + 1):5
+            ri = Symbol("R$i")
+            rj = Symbol("R$j")
+            rij = Symbol("R$(i)$(j)")
+            # Epistatic/synergistic interaction Delta_ij = Y_ij - Y_i - Y_j + Y_0
+            pairwise_interactions[(ri, rj)] = runs[rij].composite_response -
+                runs[ri].composite_response - runs[rj].composite_response + y0
+        end
+    else # :knock_out
+        # In knockout mode, R0 is the full model (all 5 mechanisms active)
+        runs[:R0] = eval_config((1, 2, 3, 4, 5))
+        for i in 1:5
+            active_subset = Tuple(k for k in 1:5 if k != i)
+            runs[Symbol("R$i")] = eval_config(active_subset)
+        end
+        for i in 1:4, j in (i + 1):5
+            active_subset = Tuple(k for k in 1:5 if k != i && k != j)
+            runs[Symbol("R$(i)$(j)")] = eval_config(active_subset)
+        end
+        runs[:R_null] = eval_config(())
+
+        y0 = runs[:R0].composite_response
+        for i in 1:5
+            # Loss of function when mechanism i is knocked out: Y_0 - Y_i
+            main_effects[Symbol("R$i")] = y0 - runs[Symbol("R$i")].composite_response
+        end
+
+        for i in 1:4, j in (i + 1):5
+            ri = Symbol("R$i")
+            rj = Symbol("R$j")
+            rij = Symbol("R$(i)$(j)")
+            # Pairwise knockout interaction: Y_i + Y_j - Y_ij - Y_0
+            pairwise_interactions[(ri, rj)] = runs[ri].composite_response +
+                runs[rj].composite_response - runs[rij].composite_response - y0
+        end
     end
 
     total_var = sum(v^2 for v in values(main_effects)) + sum(v^2 for v in values(pairwise_interactions))
     denom_var = max(total_var, 1e-18)
-    sensitivity_indices = Dict{Symbol,Float64}(
+    first_order_sensitivity_indices = Dict{Symbol,Float64}(
         k => (v^2) / denom_var for (k, v) in main_effects
     )
+    pairwise_sensitivity_indices = Dict{Tuple{Symbol,Symbol},Float64}(
+        k => (v^2) / denom_var for (k, v) in pairwise_interactions
+    )
+
+    total_order_sensitivity_indices = Dict{Symbol,Float64}()
+    for i in 1:5
+        ri = Symbol("R$i")
+        s_i = first_order_sensitivity_indices[ri]
+        sum_interactions = 0.0
+        for j in 1:5
+            if j != i
+                pair_key = i < j ? (Symbol("R$i"), Symbol("R$j")) : (Symbol("R$j"), Symbol("R$i"))
+                sum_interactions += get(pairwise_sensitivity_indices, pair_key, 0.0)
+            end
+        end
+        total_order_sensitivity_indices[ri] = min(1.0, s_i + sum_interactions)
+    end
 
     return (
         runs = runs,
         main_effects = main_effects,
         pairwise_interactions = pairwise_interactions,
-        first_order_sensitivity_indices = sensitivity_indices,
+        first_order_sensitivity_indices = first_order_sensitivity_indices,
+        pairwise_sensitivity_indices = pairwise_sensitivity_indices,
+        total_order_sensitivity_indices = total_order_sensitivity_indices,
+        mode = mode,
         n_configurations_evaluated = length(runs)
     )
 end
+
+"""
+Formal 5-tier release status flags for validation ladder gates (Control 6 / Milestone M6.5):
+1. `implemented::Bool`: Code and data structures exist.
+2. `software_verified::Bool`: Software test assertions execute and pass.
+3. `numerically_benchmarked::Bool`: Verified against independent numerical or analytical references.
+4. `experimentally_calibrated::Bool`: Model parameters calibrated against empirical experimental data (false until wet-lab data are fitted).
+5. `empirically_validated::Bool`: Prospective predictions verified against independent held-out wet-lab data (false until prospective wet-lab validation).
+"""
+struct GateStatusFlags
+    gate::Symbol
+    implemented::Bool
+    software_verified::Bool
+    numerically_benchmarked::Bool
+    experimentally_calibrated::Bool
+    empirically_validated::Bool
+
+    function GateStatusFlags(
+            gate::Symbol,
+            implemented::Bool,
+            software_verified::Bool,
+            numerically_benchmarked::Bool,
+            experimentally_calibrated::Bool,
+            empirically_validated::Bool)
+        new(gate, implemented, software_verified, numerically_benchmarked, experimentally_calibrated, empirically_validated)
+    end
+
+    function GateStatusFlags(
+            implemented::Bool,
+            software_verified::Bool,
+            numerically_benchmarked::Bool,
+            experimentally_calibrated::Bool,
+            empirically_validated::Bool;
+            gate::Symbol=:unspecified)
+        new(gate, implemented, software_verified, numerically_benchmarked, experimentally_calibrated, empirically_validated)
+    end
+end
+
+const GateStatus5Tier = GateStatusFlags
 
 struct ValidationLadderReport
     gate_order::Vector{Symbol}
@@ -5916,6 +7370,64 @@ struct ValidationLadderReport
     numerical_verification_complete::Bool
     empirical_generalization_established::Bool
     claim_boundary::Symbol
+    gate_status_flags::Dict{Symbol,GateStatusFlags}
+    implemented::Bool
+    software_verified::Bool
+    numerically_benchmarked::Bool
+    experimentally_calibrated::Bool
+    empirically_validated::Bool
+end
+
+function Base.getproperty(report::ValidationLadderReport, sym::Symbol)
+    if sym === :gate_status || sym === :gate_status_5tier
+        return getfield(report, :gate_status_flags)
+    end
+    return getfield(report, sym)
+end
+
+function ValidationLadderReport(
+        gate_order::Vector{Symbol},
+        gate_passed::Dict{Symbol,Bool},
+        gate_summaries::Dict{Symbol,String},
+        highest_passed_gate::Symbol,
+        numerical_verification_complete::Bool,
+        empirical_generalization_established::Bool,
+        claim_boundary::Symbol)
+    status_flags = Dict{Symbol,GateStatusFlags}()
+    for g in gate_order
+        p = get(gate_passed, g, false)
+        status_flags[g] = GateStatusFlags(g, true, p, p, false, false)
+    end
+    num_ok = numerical_verification_complete
+    return ValidationLadderReport(
+        gate_order, gate_passed, gate_summaries, highest_passed_gate,
+        numerical_verification_complete, empirical_generalization_established, claim_boundary,
+        status_flags,
+        true, num_ok, num_ok, false, empirical_generalization_established && num_ok
+    )
+end
+
+function ValidationLadderReport(
+        gate_order::Vector{Symbol},
+        gate_passed::Dict{Symbol,Bool},
+        gate_summaries::Dict{Symbol,String},
+        highest_passed_gate::Symbol,
+        numerical_verification_complete::Bool,
+        empirical_generalization_established::Bool,
+        claim_boundary::Symbol,
+        gate_status_flags::Dict{Symbol,GateStatusFlags})
+    overall_implemented = all(f.implemented for f in values(gate_status_flags))
+    overall_software = all(f.software_verified for f in values(gate_status_flags))
+    overall_numerical = all(f.numerically_benchmarked for f in values(gate_status_flags))
+    overall_calibrated = all(f.experimentally_calibrated for f in values(gate_status_flags))
+    overall_validated = empirical_generalization_established && numerical_verification_complete
+    return ValidationLadderReport(
+        gate_order, gate_passed, gate_summaries, highest_passed_gate,
+        numerical_verification_complete, empirical_generalization_established, claim_boundary,
+        gate_status_flags,
+        overall_implemented, overall_software, overall_numerical,
+        overall_calibrated, overall_validated
+    )
 end
 
 """
@@ -5931,13 +7443,27 @@ function evaluate_validation_ladder(;
         provenance_registry::ParameterProvenanceRegistry=build_default_biofilm_provenance_registry(),
         mesh_exchange::Union{Nothing,OpenFOAMMeshExchange}=nothing,
         phreeqc_adapter::Union{Nothing,PHREEQCSpeciesAdapter}=nothing,
+        shear_modulus_contract::Union{Nothing,HydrogelBiofilmShearModulusContract}=nothing,
+        developing_flow_contract::Union{Nothing,DevelopingFlowShearContract}=nothing,
+        viscoelastic_focusing_contract::Union{Nothing,SerpentineViscoelasticFocusingContract}=nothing,
         empirical_protocol::EmpiricalValidationProtocol=EmpiricalValidationProtocol(
             protocol_id="SYNTH-DEFAULT-M6",
             track=:track1_nanobio,
             data_provenance=:synthetic_simulation
         ),
         heldout_run_accuracy::Real=0.92,
-        feature_psi_drift::Real=0.05)
+        min_empirical_accuracy::Real=0.80,
+        feature_psi_drift::Real=0.05,
+        max_allowed_psi::Real=0.25,
+        feature_z_shift::Real=0.0,
+        max_allowed_z_shift::Real=1.5,
+        ood_fraction::Real=0.0,
+        max_allowed_ood_fraction::Real=0.15,
+        minority_class_recall::Union{Nothing,Real}=nothing,
+        min_minority_class_recall::Real=0.75,
+        replicate_min_accuracy::Union{Nothing,Real}=nothing,
+        min_replicate_accuracy::Real=0.75,
+        target_task::Symbol=:cell_stress_damage)
     gates = collect(Symbol, VALID_VALIDATION_LADDER_GATES)
     passed = Dict{Symbol,Bool}()
     summaries = Dict{Symbol,String}()
@@ -5989,7 +7515,8 @@ function evaluate_validation_ladder(;
     summaries[:G2_phreeqc_thermodynamic_benchmark] =
         "db=$(ph_ad.database_version), Menke_rel_err=$(round(100.0 * menke.max_retardation_rel_error; digits=4))%"
 
-    # G3: Constitutive maturity, multi-probe diffusivity monotonicity & non-uniform 1D FV transport
+    # G3: Constitutive maturity, multi-probe diffusivity monotonicity, non-uniform 1D FV transport,
+    # and microfluidic characterization contracts (Milestone M2 / R3.5)
     diff_cal = calibrate_and_audit_effective_diffusivity()
     x_nonunif = [0.0, 5.0e-6, 12.0e-6, 25.0e-6, 45.0e-6, 80.0e-6]
     rt_nonunif = solve_1d_reactive_transport_biofilm(
@@ -5999,30 +7526,151 @@ function evaluate_validation_ladder(;
         initial_concentration_mol_m3 = fill(0.25, length(x_nonunif)),
         first_order_uptake_s = 0.02
     )
-    g3_ok = diff_cal.all_physical_invariants_satisfied && rt_nonunif.nonuniform_grid && rt_nonunif.mass_conserved
+
+    shear_ctr = shear_modulus_contract === nothing ?
+        HydrogelBiofilmShearModulusContract() : shear_modulus_contract
+    flow_ctr = developing_flow_contract === nothing ?
+        DevelopingFlowShearContract() : developing_flow_contract
+    visco_ctr = viscoelastic_focusing_contract === nothing ?
+        SerpentineViscoelasticFocusingContract() : viscoelastic_focusing_contract
+
+    g3_ok = diff_cal.all_physical_invariants_satisfied &&
+            rt_nonunif.nonuniform_grid &&
+            rt_nonunif.mass_conserved &&
+            shear_ctr.contract_verified &&
+            flow_ctr.contract_verified &&
+            visco_ctr.contract_verified
+
     passed[:G3_constitutive_transport_verification] = g3_ok
     summaries[:G3_constitutive_transport_verification] =
-        "invariants=$(diff_cal.all_physical_invariants_satisfied), nonunif_FV_err=$(round(rt_nonunif.relative_mass_balance_error; sigdigits=3))"
+        "invariants=$(diff_cal.all_physical_invariants_satisfied), nonunif_FV_err=$(round(rt_nonunif.relative_mass_balance_error; sigdigits=3)), G=$(round(shear_ctr.shear_modulus_pa; digits=1))Pa, fRe=$(round(flow_ctr.poiseuille_friction_factor_re; digits=2)), Wi*De^(-0.5)=$(round(visco_ctr.focusing_regime_parameter; digits=2))"
 
-    # G4: Regulatory graph G=(V,E) species separation & Droop quota mass conservation
+    # G4: Regulatory graph G=(V,E) species separation & Droop quota mass conservation (Milestone M3 / R4.1-R4.4)
+    # 1. S. aureus regulatory network validity
     sa_graph = build_species_regulatory_network(:staphylococcus_aureus)
-    reg_app = validate_regulatory_network_applicability(sa_graph, BiofilmRegulatoryParams())
-    droop_aud = audit_droop_quota_conservation()
-    g4_ok = reg_app.valid && droop_aud.mass_conserved
+    sa_params = BiofilmRegulatoryParams(
+        topology = QSRegulatoryTopology(topology_id=:staphylococcus_agr_rnaiii_psm, pqse_chaperone_coupling=0.0),
+        vancomycin_exposure_ug_ml = 4.0
+    )
+    sa_audit = validate_regulatory_network_applicability(sa_graph, sa_params; requested_species=:staphylococcus_aureus)
+    sa_ok = sa_audit.valid && sa_audit.species_separation_enforced
+
+    # 2. P. aeruginosa PA14 regulatory network validity
+    pa_graph = build_species_regulatory_network(:pseudomonas_aeruginosa)
+    pa_params = BiofilmRegulatoryParams(
+        topology = QSRegulatoryTopology(topology_id=:pseudomonas_pqse_rhlr, pqse_chaperone_coupling=0.75),
+        vancomycin_exposure_ug_ml = 0.0
+    )
+    pa_audit = validate_regulatory_network_applicability(pa_graph, pa_params; requested_species=:pseudomonas_aeruginosa)
+    pa_ok = pa_audit.valid && pa_audit.species_separation_enforced
+
+    # 3. Polymicrobial regulatory bridge validity
+    poly_graph = build_species_regulatory_network(:polymicrobial_co_culture; include_polymicrobial_crosstalk=true)
+    poly_params = BiofilmRegulatoryParams()
+    poly_audit = validate_regulatory_network_applicability(poly_graph, poly_params; requested_species=:polymicrobial_co_culture)
+    poly_ok = poly_audit.valid && poly_graph.allow_cross_species_edges && (poly_audit.cross_species_edges_count > 0)
+
+    # 4. Negative Chimera parameter rejection
+    chimera_params = BiofilmRegulatoryParams(
+        topology = QSRegulatoryTopology(topology_id=:staphylococcus_agr_rnaiii_psm, pqse_chaperone_coupling=0.85)
+    )
+    chimera_audit = validate_regulatory_network_applicability(sa_graph, chimera_params; requested_species=:staphylococcus_aureus)
+    chimera_rejected = !chimera_audit.valid && ("pseudomonas_pqse_chaperone_coupling_nonzero_in_staphylococcus" in chimera_audit.blocking_violations)
+    chimera_ok = chimera_rejected
+
+    # 5. Droop cell quota mass conservation to machine precision (< 1e-12)
+    droop_aud = audit_droop_mass_conservation(tolerance=1e-12)
+    droop_ok = droop_aud.mass_conserved && (droop_aud.max_relative_conservation_error < 1e-12)
+
+    g4_ok = sa_ok && pa_ok && poly_ok && chimera_ok && droop_ok
     passed[:G4_regulatory_graph_quota_audit] = g4_ok
     summaries[:G4_regulatory_graph_quota_audit] =
-        "graph_valid=$(reg_app.valid), droop_rel_err=$(round(droop_aud.max_relative_conservation_error; sigdigits=3))"
+        "SA=$sa_ok, PA14=$pa_ok, poly_bridge=$poly_ok, chimera_rejection=$chimera_ok, droop_err=$(round(droop_aud.max_relative_conservation_error; sigdigits=3))"
 
     # G5: Empirical held-out generalization gate (strictly false on synthetic runs)
     emp_eval = evaluate_empirical_generalization_readiness(
         empirical_protocol;
+        target_task=target_task,
         heldout_run_accuracy=heldout_run_accuracy,
-        feature_psi_drift=feature_psi_drift
+        min_empirical_accuracy=min_empirical_accuracy,
+        feature_psi_drift=feature_psi_drift,
+        max_allowed_psi=max_allowed_psi,
+        feature_z_shift=feature_z_shift,
+        max_allowed_z_shift=max_allowed_z_shift,
+        ood_fraction=ood_fraction,
+        max_allowed_ood_fraction=max_allowed_ood_fraction,
+        minority_class_recall=minority_class_recall,
+        min_minority_class_recall=min_minority_class_recall,
+        replicate_min_accuracy=replicate_min_accuracy,
+        min_replicate_accuracy=min_replicate_accuracy
     )
     g5_ok = emp_eval.empirical_generalization_established
     passed[:G5_empirical_generalization_gate] = g5_ok
     summaries[:G5_empirical_generalization_gate] =
         "provenance=$(empirical_protocol.data_provenance), empirical_established=$(g5_ok), decision=$(emp_eval.recommended_decision)"
+
+    # Formal 5-tier status flags across all gates G0..G5 (Control 6)
+    is_synth_run = (empirical_protocol.data_provenance != :deidentified_experimental_fcs)
+    status_flags = Dict{Symbol,GateStatusFlags}()
+
+    status_flags[:G0_dimensional_provenance] = GateStatusFlags(
+        :G0_dimensional_provenance,
+        true,
+        g0_ok,
+        g0_ok,
+        reg_audit.all_parameters_calibrated && !is_synth_run,
+        false
+    )
+
+    status_flags[:G1_mesh_conservation_cfl] = GateStatusFlags(
+        :G1_mesh_conservation_cfl,
+        true,
+        g1_ok,
+        g1_ok,
+        false,
+        false
+    )
+
+    status_flags[:G2_phreeqc_thermodynamic_benchmark] = GateStatusFlags(
+        :G2_phreeqc_thermodynamic_benchmark,
+        true,
+        g2_ok,
+        g2_ok,
+        false,
+        false
+    )
+
+    status_flags[:G3_constitutive_transport_verification] = GateStatusFlags(
+        :G3_constitutive_transport_verification,
+        true,
+        g3_ok,
+        g3_ok,
+        false,
+        false
+    )
+
+    status_flags[:G4_regulatory_graph_quota_audit] = GateStatusFlags(
+        :G4_regulatory_graph_quota_audit,
+        true,
+        g4_ok,
+        g4_ok,
+        false,
+        false
+    )
+
+    g5_software_ok = emp_eval.software_verification_passed
+    g5_num_bench = g5_software_ok && !emp_eval.domain_shift_detected
+    g5_exp_cal = (!is_synth_run) && (empirical_protocol.data_provenance == :deidentified_experimental_fcs) && g5_ok
+    g5_emp_val = (!is_synth_run) && g5_ok
+
+    status_flags[:G5_empirical_generalization_gate] = GateStatusFlags(
+        :G5_empirical_generalization_gate,
+        true,
+        g5_software_ok,
+        g5_num_bench,
+        g5_exp_cal,
+        g5_emp_val
+    )
 
     highest = :none
     for g in gates
@@ -6041,8 +7689,20 @@ function evaluate_validation_ladder(;
         :verification_incomplete
     end
 
+    overall_implemented = all(f.implemented for f in values(status_flags))
+    overall_software_verified = num_ok && g5_software_ok
+    overall_numerically_benchmarked = num_ok && g5_num_bench
+    overall_experimentally_calibrated = all(f.experimentally_calibrated for f in values(status_flags))
+    overall_empirically_validated = g5_ok && num_ok
+
     return ValidationLadderReport(
-        gates, passed, summaries, highest, num_ok, g5_ok, claim_bound
+        gates, passed, summaries, highest, num_ok, g5_ok, claim_bound,
+        status_flags,
+        overall_implemented,
+        overall_software_verified,
+        overall_numerically_benchmarked,
+        overall_experimentally_calibrated,
+        overall_empirically_validated
     )
 end
 
@@ -6116,11 +7776,15 @@ export ENGINE_VERSION, FCSIO, CytometryAnalysis, CellClassifier, MicrofluidicBri
        # Re-exports from SharedVisualizationPhysics
        CoreMultishellSpec, CoreMultishellSnapshot, CoreMultishellSolution,
        solve_core_multishell_rd,
+       Ghosh2010_B12_PEGMA_315nm, GhoshPatent_Cisplatin_DoubleShell_191nm,
+       CoreMultishellFitResult, fit_core_multishell_release_curve,
+       PulsedDutyCycleComparison, simulate_pulsed_duty_cycle_release,
        EmulsionDropletSpec, EmulsionDropletSnapshot, EmulsionDropletSolution,
        solve_emulsion_interfacial_droplet,
        # Re-exports from BiofilmMultiphysics (M3, M4, M6)
        VALID_QS_TOPOLOGIES, VALID_MORPHOLOGICAL_PHASES,
        VALID_CONSTITUTIVE_MATURITY_LEVELS, ConstitutiveMaturityLevel,
+       SA_REGULATORY_MARKER_NODES, PA_REGULATORY_MARKER_NODES,
        BiofilmHypothesisSwitches,
        BiofilmMatrixComposition, total_matrix_biopolymer_kg_m3,
        ThinFilmSwellingMechanicsSpec, evaluate_biofilm_swelling_mechanics,
@@ -6132,6 +7796,11 @@ export ENGINE_VERSION, FCSIO, CytometryAnalysis, CellClassifier, MicrofluidicBri
        QSRegulatoryTopology,
        ElectrokineticQSSpec, evaluate_qs_signal_degradation,
        compare_spatial_vs_multiplicative_ahl_shielding,
+       HydrogelBiofilmShearModulusContract, evaluate_hydrogel_shear_modulus,
+       DevelopingFlowShearContract, shah_london_friction_factor_re,
+       compute_hydrodynamic_entrance_length, evaluate_developing_flow_shear,
+       SerpentineViscoelasticFocusingContract, evaluate_serpentine_viscoelastic_focusing,
+       categorize_mechanistic_quantities,
        PolymicrobialCrosstalkSpec, evaluate_polymicrobial_crosstalk,
        BiofilmRegulatoryState, BiofilmRegulatoryParams,
        step_biofilm_regulatory_ode, simulate_biofilm_regulatory_trajectory,
@@ -6140,7 +7809,9 @@ export ENGINE_VERSION, FCSIO, CytometryAnalysis, CellClassifier, MicrofluidicBri
        RegulatoryInteractionEdge, RegulatoryNetworkGraph,
        build_species_regulatory_network, validate_regulatory_network_applicability,
        DroopQuotaMassBalanceAudit, audit_droop_quota_conservation,
+       DroopCellQuotaModel, simulate_droop_quota_dynamics, audit_droop_mass_conservation,
        run_biofilm_ablation_matrix,
-       ValidationLadderReport, evaluate_validation_ladder
+       ValidationLadderReport, evaluate_validation_ladder,
+       GateStatusFlags, GateStatus5Tier
 
 end # module MicrofluidicClassificationEngine
