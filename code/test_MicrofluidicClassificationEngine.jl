@@ -1009,5 +1009,344 @@ using .MicrofluidicClassificationEngine
         )
         @test !bridge_no_img.audit_record.heldout_validated
     end
+
+    # =======================================================================
+    # 8. Milestone M6.1 (Gate G0): Default Biofilm Parameter Provenance Registry
+    # =======================================================================
+    @testset "Milestone M6.1: Default biofilm parameter provenance registry and Gate G0 audit" begin
+        @test ENGINE_VERSION == "0.4.0"
+
+        default_reg = build_default_biofilm_provenance_registry()
+        @test length(default_reg.entries) >= 12
+        @test haskey(default_reg.entries, :pga_osmotic_coeff_pa_m3_kg)
+        @test haskey(default_reg.entries, :curli_modulus_coeff_pa_m3_kg)
+        @test haskey(default_reg.entries, :min_droop_quota)
+
+        g0_audit = audit_parameter_provenance_registry(default_reg; require_all_calibrated=false)
+        @test g0_audit.gate_g0_dimensional_passed
+        @test g0_audit.audit_passed
+        @test g0_audit.dimensional_audit.equation_homogeneity_ok
+        @test isempty(g0_audit.dimensional_audit.mismatched_quantities)
+        # Because default registry includes assumed/uncalibrated entries (e.g. ev_psm_induced_release_per_m3_s),
+        # it must not claim all_parameters_calibrated = true
+        @test !g0_audit.all_parameters_calibrated
+        @test :ev_psm_induced_release_per_m3_s in g0_audit.uncalibrated_parameters
+    end
+
+    # =======================================================================
+    # 9. Milestone M6.3 (Gate G3): Constitutive Maturity, Multi-Probe Diffusivity,
+    #    Non-Uniform 1D FV Reactive Transport, and Spatial vs 0D AHL Shielding
+    # =======================================================================
+    @testset "Milestone M6.3: Constitutive maturity levels, multi-probe diffusivity calibration, non-uniform 1D FV transport, and spatial AHL shielding" begin
+        comp_wt = BiofilmMatrixComposition(pga_kg_m3=18.0, eps_kg_m3=28.0, curli_kg_m3=12.0, cellulose_kg_m3=6.0, porosity=0.76)
+
+        # 1. Constitutive maturity level tagging and poroelastic/viscoelastic timescales
+        spec_l1 = ThinFilmSwellingMechanicsSpec(constitutive_maturity_level=:level1_phenomenological_hypothesis)
+        spec_l3 = ThinFilmSwellingMechanicsSpec(
+            constitutive_maturity_level=:level3_coupled_poroelastic_viscoelastic,
+            poroelastic_biot_modulus_pa=3200.0,
+            viscoelastic_relaxation_time_s=240.0
+        )
+        @test_throws ArgumentError ThinFilmSwellingMechanicsSpec(constitutive_maturity_level=:invalid_level)
+
+        mech_l1 = evaluate_biofilm_swelling_mechanics(comp_wt, spec_l1)
+        mech_l3 = evaluate_biofilm_swelling_mechanics(comp_wt, spec_l3)
+        @test mech_l1.constitutive_maturity_level == :level1_phenomenological_hypothesis
+        @test mech_l3.constitutive_maturity_level == :level3_coupled_poroelastic_viscoelastic
+        @test mech_l3.viscoelastic_relaxed_modulus_pa < mech_l3.composite_modulus_pa
+        @test mech_l3.poroelastic_consolidation_time_s > 0.0
+
+        # 2. Multi-probe diffusivity calibration and physical monotonicity invariants
+        cal_default = calibrate_and_audit_effective_diffusivity(comp_wt)
+        @test cal_default.size_exclusion_monotonic
+        @test cal_default.curli_sieving_monotonic
+        @test cal_default.cationic_retardation_verified
+        @test cal_default.debye_screening_monotonic
+        @test cal_default.all_physical_invariants_satisfied
+        @test cal_default.n_calibration_points == 12
+        @test cal_default.calibration_rmse <= 1e-12
+
+        # Perturbed experimental probe calibration points report positive RMSE
+        pt_pert = ProbeDiffusivityCalibrationPoint(
+            probe_name = "FITC-dextran-4kDa",
+            probe_radius_nm = 1.4,
+            probe_charge_valence = 0.0,
+            ionic_strength_mol_l = 0.15,
+            measured_relative_diffusivity = 0.45,
+            composition = comp_wt
+        )
+        cal_custom = calibrate_and_audit_effective_diffusivity(comp_wt; calibration_points=[pt_pert])
+        @test cal_custom.all_physical_invariants_satisfied
+        @test cal_custom.n_calibration_points == 1
+        @test isfinite(cal_custom.calibration_rmse) && cal_custom.calibration_rmse >= 0.0
+        @test_throws ArgumentError ProbeDiffusivityCalibrationPoint(
+            probe_name="", probe_radius_nm=1.0, probe_charge_valence=0.0,
+            ionic_strength_mol_l=0.1, measured_relative_diffusivity=0.5
+        )
+
+        # 3. Non-uniform 1D finite-volume reactive transport (refined near boundary layer)
+        x_nonunif = [0.0, 2.0e-6, 5.0e-6, 10.0e-6, 20.0e-6, 40.0e-6, 70.0e-6, 110.0e-6]
+        n_nu = length(x_nonunif)
+        comps_nu = [
+            BiofilmMatrixComposition(
+                pga_kg_m3 = 10.0 + 1.5 * i,
+                eps_kg_m3 = 20.0 + 2.0 * i,
+                curli_kg_m3 = 4.0 + 1.5 * i,
+                cellulose_kg_m3 = 5.0,
+                porosity = 0.82 - 0.02 * i
+            )
+            for i in 1:n_nu
+        ]
+        sol_nu = solve_1d_reactive_transport_biofilm(
+            x_grid_m = x_nonunif,
+            times_s = [0.0, 5.0, 15.0, 30.0],
+            compositions = comps_nu,
+            initial_concentration_mol_m3 = fill(0.40, n_nu),
+            first_order_uptake_s = 0.015,
+            boundary_left_flux_mol_m2_s = 1.0e-6,
+            boundary_right_flux_mol_m2_s = 0.5e-6
+        )
+        @test sol_nu.nonuniform_grid
+        @test sol_nu.mass_conserved
+        @test sol_nu.relative_mass_balance_error <= 1e-6
+        @test all(all(c .>= 0.0) for c in sol_nu.profiles_mol_m3)
+
+        # Explicit cell_widths_m vector validation
+        @test_throws ArgumentError solve_1d_reactive_transport_biofilm(
+            x_grid_m = x_nonunif,
+            times_s = [0.0, 5.0],
+            compositions = comps_nu,
+            cell_widths_m = [1.0e-6, 2.0e-6] # wrong length
+        )
+
+        # 4. Direct electrochemical vs ROS-mediated vs enzymatic quorum-quenching separation
+        ek_spec = ElectrokineticQSSpec(
+            electric_field_v_m = 2000.0,
+            ros_generation_factor = 1.2,
+            k_electric_ros_s = 0.020,
+            k_enzymatic_qq_s = 0.005,
+            matrix_shielding_coeff = 0.07,
+            direct_electrochemical_fraction = 0.35
+        )
+        deg_res = evaluate_qs_signal_degradation(1.5, ek_spec; intact_biofilm_matrix=comp_wt)
+        @test isapprox(
+            deg_res.direct_electrochemical_rate_s + deg_res.ros_mediated_degradation_rate_s,
+            deg_res.abiotic_electric_ros_rate_s; rtol=1e-12
+        )
+        @test isapprox(
+            deg_res.direct_electrochemical_rate_s / deg_res.abiotic_electric_ros_rate_s,
+            0.35; rtol=1e-12
+        )
+        @test deg_res.enzymatic_quorum_quenching_rate_s == deg_res.biotic_quorum_quenching_rate_s
+
+        # 5. Spatial 1D reaction-diffusion vs 0D multiplicative AHL shielding comparator
+        shield_cmp = compare_spatial_vs_multiplicative_ahl_shielding(
+            comp_wt, ek_spec;
+            initial_signal_um = 2.0,
+            film_thickness_um = 120.0,
+            exposure_duration_s = 45.0,
+            n_cells = 32
+        )
+        @test shield_cmp.spatial_basal_signal_um > shield_cmp.spatial_surface_signal_um
+        @test shield_cmp.thiele_modulus > 0.0
+        @test shield_cmp.penetration_depth_um > 0.0
+        @test shield_cmp.relative_discrepancy > 0.0
+    end
+
+    # =======================================================================
+    # 10. Milestone M6.4 (Gate G4): Auditable Regulatory Graph G=(V,E),
+    #     Species Separation, and Droop Quota Conservation
+    # =======================================================================
+    @testset "Milestone M6.4: RegulatoryNetworkGraph species separation and Droop quota mass conservation" begin
+        # 1. Monoculture S. aureus vs P. aeruginosa vs polymicrobial co-culture regulatory graphs
+        g_sa = build_species_regulatory_network(:staphylococcus_aureus)
+        g_pa = build_species_regulatory_network(:pseudomonas_aeruginosa)
+        g_poly = build_species_regulatory_network(:polymicrobial_co_culture)
+
+        @test g_sa.primary_species == :staphylococcus_aureus
+        @test !g_sa.allow_cross_species_edges
+        @test "RNAIII" in g_sa.nodes && "alpha_PSM" in g_sa.nodes
+        @test !("PqsE_Chaperone" in g_sa.nodes)
+
+        @test g_pa.primary_species == :pseudomonas_aeruginosa
+        @test !g_pa.allow_cross_species_edges
+        @test "PqsE_Chaperone" in g_pa.nodes && "RhlR_Regulon" in g_pa.nodes
+
+        @test g_poly.primary_species == :polymicrobial_co_culture
+        @test g_poly.allow_cross_species_edges
+        @test length(g_poly.edges) > length(g_sa.edges) + length(g_pa.edges)
+
+        # 2. Validate species applicability contract and catch cross-species Chimera errors
+        params_sa_ok = BiofilmRegulatoryParams(
+            topology = QSRegulatoryTopology(topology_id=:staphylococcus_agr_rnaiii_psm, pqse_chaperone_coupling=0.0),
+            vancomycin_exposure_ug_ml = 4.0
+        )
+        app_sa_ok = validate_regulatory_network_applicability(g_sa, params_sa_ok)
+        @test app_sa_ok.valid
+        @test app_sa_ok.species_separation_enforced
+        @test isempty(app_sa_ok.blocking_violations)
+
+        # Applying P. aeruginosa PqsE chaperone coupling > 0 to S. aureus monoculture is rejected
+        params_chimera = BiofilmRegulatoryParams(
+            topology = QSRegulatoryTopology(topology_id=:staphylococcus_agr_rnaiii_psm, pqse_chaperone_coupling=0.85)
+        )
+        app_chimera = validate_regulatory_network_applicability(g_sa, params_chimera)
+        @test !app_chimera.valid
+        @test "pseudomonas_pqse_chaperone_coupling_nonzero_in_staphylococcus" in app_chimera.blocking_violations
+
+        # Applying S. aureus Agr topology or vancomycin fruA/fruK tolerance to P. aeruginosa monoculture is rejected
+        app_pa_bad = validate_regulatory_network_applicability(g_pa, params_sa_ok)
+        @test !app_pa_bad.valid
+        @test "staphylococcus_agr_topology_applied_to_pseudomonas_monoculture" in app_pa_bad.blocking_violations
+        @test "staphylococcus_vancomycin_fruA_fruK_tolerance_applied_to_pseudomonas" in app_pa_bad.blocking_violations
+
+        # Calibrated edge without citation or edge referencing unknown node throws ArgumentError
+        @test_throws ArgumentError RegulatoryInteractionEdge(
+            source_node="A", target_node="B", evidence_status=:calibrated, citation=""
+        )
+        @test_throws ArgumentError build_species_regulatory_network(:unknown_bacterium)
+
+        # 3. Closed-system Droop intracellular nutrient quota mass conservation: N(t) + Q(t)*X(t) = const
+        droop_audit = audit_droop_quota_conservation(
+            initial_nutrient_mm = 6.0,
+            initial_quota_mmol_gdw = 0.65,
+            initial_biomass_gdw_l = 0.40,
+            min_quota_mmol_gdw = 0.22,
+            max_quota_mmol_gdw = 1.25,
+            max_uptake_rate_mmol_gdw_h = 0.50,
+            half_saturation_mm = 0.75,
+            max_growth_rate_h = 0.38,
+            times_h = collect(0.0:1.0:16.0)
+        )
+        @test droop_audit.mass_conserved
+        @test droop_audit.quota_bounds_respected
+        @test droop_audit.max_relative_conservation_error <= 1e-13
+        @test droop_audit.extracellular_nutrient_mm[end] < droop_audit.extracellular_nutrient_mm[1]
+        @test droop_audit.biomass_gdw_l[end] > droop_audit.biomass_gdw_l[1]
+        @test isapprox(droop_audit.initial_inventory_mm, droop_audit.final_inventory_mm; rtol=1e-13)
+    end
+
+    # =======================================================================
+    # 11. Milestone M6.5 (Gate G5): Controlled Ablation Matrix (R0..R5 + Pairwise),
+    #     Validation Ladder (G0..G5), Multivariate Mahalanobis OOD, and Stratified Gates
+    # =======================================================================
+    @testset "Milestone M6.5: Controlled ablation matrix R0-R5, ValidationLadderReport G0-G5, multivariate Mahalanobis OOD, and stratified gates" begin
+        # 1. Controlled ablation matrix R0..R5, all 10 pairwise combinations R_ij, and R_full
+        ablation = run_biofilm_ablation_matrix()
+        @test ablation.n_configurations_evaluated == 17 # R0 + 5 single + 10 pairwise + R_full
+        @test haskey(ablation.runs, :R0)
+        @test haskey(ablation.runs, :R_full)
+        for i in 1:5
+            @test haskey(ablation.runs, Symbol("R$i"))
+            @test haskey(ablation.main_effects, Symbol("R$i"))
+            @test haskey(ablation.first_order_sensitivity_indices, Symbol("R$i"))
+        end
+        @test length(ablation.pairwise_interactions) == 10
+        # R1 (swelling mechanics) increases wrinkling index over R0 (0.0)
+        @test ablation.runs[:R0].wrinkling_index == 0.0
+        @test ablation.runs[:R1].wrinkling_index > 0.0
+        # R2 (heterogeneous matrix diffusion) reduces relative diffusivity compared to homogeneous R0
+        @test ablation.runs[:R2].relative_diffusivity < ablation.runs[:R0].relative_diffusivity
+        # R5 (electrokinetic AHL degradation + crosstalk) reduces final autoinducer level compared to R0
+        @test ablation.runs[:R5].final_autoinducer_um < ablation.runs[:R0].final_autoinducer_um
+
+        # 2. Multivariate Mahalanobis distance and covariance Frobenius shift catch correlation-flipped OOD
+        #    even when marginal means and variances are nearly unchanged
+        rng_mv = MersenneTwister(20261031)
+        n_tr = 120
+        z1 = randn(rng_mv, n_tr)
+        z2 = 0.92 .* z1 .+ 0.39 .* randn(rng_mv, n_tr) # strongly positively correlated in training
+        X_corr_tr = hcat(z1, z2)
+
+        e1 = randn(rng_mv, 60)
+        e2 = -0.92 .* e1 .+ 0.39 .* randn(rng_mv, 60) # correlation flipped (-0.92) in evaluation!
+        X_corr_ev = hcat(e1, e2)
+
+        shift_mv = detect_feature_domain_shift(
+            X_corr_tr, X_corr_ev;
+            feature_names = ["f_corr_1", "f_corr_2"],
+            psi_threshold = 0.50, # high univariate threshold so univariate PSI/Z do not trigger
+            z_threshold = 2.5,
+            covariance_shift_threshold = 0.80,
+            ood_fraction_threshold = 0.15
+        )
+        @test shift_mv.max_abs_z_shift < 1.0 # univariate means match
+        @test shift_mv.covariance_frobenius_rel_shift > 0.80 # correlation flip caught by covariance Frobenius shift
+        @test shift_mv.multivariate_shift_detected
+        @test shift_mv.shifted
+        @test shift_mv.recommended_abstention_policy in (:abstain_and_recalibrate, :elevated_deferral_threshold)
+
+        # 3. Stratified per-group ECE, minority-class recall, and biological replicate gates
+        chip_tr = generate_synthetic_nanobio_fcs_dataset(
+            n_events=180, sample_id="S-TR", chip_id="CHIP-TR", run_id="RUN-TR", biological_replicate="REP-1", seed=601)
+        chip_ev = generate_synthetic_nanobio_fcs_dataset(
+            n_events=180, sample_id="S-EV", chip_id="CHIP-EV", run_id="RUN-EV", biological_replicate="REP-2", seed=602)
+        f_tr = extract_single_cell_features(chip_tr.dataset; transit_rows=chip_tr.sensor_rows)
+        f_ev = extract_single_cell_features(chip_ev.dataset; transit_rows=chip_ev.sensor_rows)
+
+        clf_m6 = train_cell_classifier(
+            f_tr.features, chip_tr.labels[:cell_stress_damage];
+            feature_names = f_tr.feature_names,
+            target_task = :cell_stress_damage,
+            group_ids = fill("CHIP-TR", 180),
+            split_group_key = :chip_id
+        )
+        preds_m6 = predict_cells(clf_m6, f_ev.features)
+        rep_groups = vcat(fill("REP-A", 90), fill("REP-B", 90))
+        rep_m6 = evaluate_classifier_predictions(
+            preds_m6, chip_ev.labels[:cell_stress_damage],
+            default_classes_for_target(:cell_stress_damage);
+            target_task = :cell_stress_damage,
+            group_ids = rep_groups
+        )
+        @test haskey(rep_m6.group_ece, "REP-A") && haskey(rep_m6.group_ece, "REP-B")
+        @test 0.0 <= rep_m6.min_class_recall <= 1.0
+        @test 0.0 <= rep_m6.min_group_accuracy <= rep_m6.accepted_accuracy
+
+        # Audit classifier empirical generalization fails when OOD fraction exceeds threshold
+        emp_proto_stress = EmpiricalValidationProtocol(
+            protocol_id = "EMP-STRESS-M6",
+            track = :track1_nanobio,
+            data_provenance = :deidentified_experimental_fcs,
+            independent_reference_labels = true,
+            counting_beads_verified = true,
+            n_independent_runs = 3,
+            n_heldout_runs = 1
+        )
+        audit_with_mv_shift = audit_classifier_empirical_generalization(
+            rep_m6, emp_proto_stress;
+            feature_psi_drift = shift_mv.max_psi,
+            feature_z_shift = shift_mv.max_abs_z_shift,
+            ood_event_fraction = shift_mv.ood_event_fraction,
+            max_ood_fraction = 0.15
+        )
+        @test !audit_with_mv_shift.empirically_generalizable
+        @test audit_with_mv_shift.recommended_decision == :abstain_or_defer_domain_shift
+        @test !isempty(audit_with_mv_shift.blocking_reasons)
+
+        # 4. End-to-end 6-gate Validation Ladder (G0..G5)
+        ladder_default = evaluate_validation_ladder()
+        @test ladder_default.gate_passed[:G0_dimensional_provenance]
+        @test ladder_default.gate_passed[:G1_mesh_conservation_cfl]
+        @test ladder_default.gate_passed[:G2_phreeqc_thermodynamic_benchmark]
+        @test ladder_default.gate_passed[:G3_constitutive_transport_verification]
+        @test ladder_default.gate_passed[:G4_regulatory_graph_quota_audit]
+        @test !ladder_default.gate_passed[:G5_empirical_generalization_gate]
+        @test ladder_default.highest_passed_gate == :G4_regulatory_graph_quota_audit
+        @test ladder_default.numerical_verification_complete
+        @test !ladder_default.empirical_generalization_established
+        @test ladder_default.claim_boundary == :synthetic_numerical_verification_only
+
+        ladder_emp = evaluate_validation_ladder(
+            empirical_protocol = emp_proto_stress,
+            heldout_run_accuracy = 0.91,
+            feature_psi_drift = 0.04
+        )
+        @test ladder_emp.numerical_verification_complete
+        @test ladder_emp.empirical_generalization_established
+        @test ladder_emp.highest_passed_gate == :G5_empirical_generalization_gate
+        @test ladder_emp.claim_boundary == :empirical_generalization_verified
+    end
 end
+
 

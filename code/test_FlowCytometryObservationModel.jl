@@ -894,4 +894,357 @@ using .FlowCytometryObservationModel
         @test res_drift.domain_shift_detected
         @test !res_drift.empirical_generalization_established
     end
+
+    # -----------------------------------------------------------------------
+    # 11. Milestone M6.1: Dimensional/Unit Audit & Parameter Provenance Registry (Gate G0)
+    # -----------------------------------------------------------------------
+    @testset "Milestone M6.1: DimensionalQuantity, OpenFOAM dimension conversion, and ParameterProvenanceRegistry" begin
+        @test MODEL_ADAPTER_VERSION == "0.4.0"
+
+        # OpenFOAM [kg m s K mol A cd] <-> SI [m kg s A K mol cd] conversion round-trip
+        of_conc = (0, -3, 0, 0, 1, 0, 0) # mol / m^3
+        si_conc = openfoam_dims_to_si_exponents(of_conc)
+        @test si_conc == (-3, 0, 0, 0, 0, 1, 0)
+        @test si_exponents_to_openfoam_dims(si_conc) == of_conc
+
+        of_shear = (1, -1, -2, 0, 0, 0, 0) # Pa = kg / (m * s^2)
+        si_shear = openfoam_dims_to_si_exponents(of_shear)
+        @test si_shear == (-1, 1, -2, 0, 0, 0, 0)
+        @test si_exponents_to_openfoam_dims(si_shear) == of_shear
+
+        # Dimensional consistency checks across quantities and governing PDE equations
+        q_c = DimensionalQuantity("C_inlet", 2.0, "mol/m^3", si_conc; physical_role=:molar_concentration_mol_m3)
+        q_d = DimensionalQuantity("D_eff", 4.9e-10, "m^2/s", (2, 0, -1, 0, 0, 0, 0); physical_role=:diffusivity_m2_s)
+        q_p = DimensionalQuantity("Pi_osm", 120.0, "Pa", si_shear; physical_role=:pressure_or_modulus_pa)
+
+        dim_ok = audit_dimensional_consistency([q_c, q_d, q_p]; check_governing_equations=true)
+        @test dim_ok.consistent
+        @test dim_ok.gate_g0_passed
+        @test dim_ok.equation_homogeneity_ok
+        @test isempty(dim_ok.mismatched_quantities)
+
+        # Mismatched SI exponents for a declared physical role fails Gate G0 dimensional audit
+        q_bad = DimensionalQuantity("C_wrong_units", 2.0, "m^3", (3, 0, 0, 0, 0, 0, 0); physical_role=:molar_concentration_mol_m3)
+        dim_bad = audit_dimensional_consistency([q_c, q_bad]; check_governing_equations=true)
+        @test !dim_bad.consistent
+        @test !dim_bad.gate_g0_passed
+        @test "C_wrong_units" in dim_bad.mismatched_quantities
+        @test_throws ArgumentError DimensionalQuantity("", 1.0, "m", (1, 0, 0, 0, 0, 0, 0))
+        @test_throws ArgumentError DimensionalQuantity("x", NaN, "m", (1, 0, 0, 0, 0, 0, 0))
+
+        # ParameterProvenanceEntry validation and registry auditing
+        p_lit = ParameterProvenanceEntry(
+            symbol = :D_aq_AHL,
+            value = 4.9e-10,
+            unit = "m^2/s",
+            si_exponents = (2, 0, -1, 0, 0, 0, 0),
+            physical_role = :diffusivity_m2_s,
+            uncertainty_bounds = (1.0e-10, 1.0e-9),
+            organism_strain = :Pseudomonas_aeruginosa_PAO1,
+            source_status = :literature_derived,
+            source_citation = "Stewart (2003) J. Bacteriol. 185(5):1485-1491",
+            calibrated = true
+        )
+        p_meas = ParameterProvenanceEntry(
+            symbol = :c_osm_eps,
+            value = 45.0,
+            unit = "Pa*m^3/kg",
+            si_exponents = (2, 0, -2, 0, 0, 0, 0),
+            physical_role = :osmotic_or_modulus_coeff_pa_m3_kg,
+            uncertainty_bounds = (10.0, 200.0),
+            organism_strain = :Pseudomonas_aeruginosa_PAO1,
+            source_status = :measured,
+            source_citation = "Granato et al. (2025) PRX Life 3:043008",
+            calibrated = true
+        )
+        p_heur = ParameterProvenanceEntry(
+            symbol = :k_detachment_shear,
+            value = 1.0e-5,
+            unit = "1/s",
+            si_exponents = (0, 0, -1, 0, 0, 0, 0),
+            physical_role = :first_order_rate_s,
+            uncertainty_bounds = (0.0, 1.0e-2),
+            organism_strain = :unassigned_synthetic,
+            source_status = :assumed,
+            source_citation = "Bounded prior pending shear detachment calibration",
+            calibrated = false
+        )
+        reg = ParameterProvenanceRegistry("TEST-REG-M6", [p_lit, p_meas, p_heur])
+        reg_audit = audit_parameter_provenance_registry(reg; target_organism=:Pseudomonas_aeruginosa_PAO1, require_all_calibrated=false)
+        @test reg_audit.gate_g0_dimensional_passed
+        @test reg_audit.audit_passed
+        @test reg_audit.total_parameters == 3
+        @test :k_detachment_shear in reg_audit.uncalibrated_parameters
+        @test :k_detachment_shear in reg_audit.cross_organism_parameters
+        @test !reg_audit.empirically_calibrated_for_target_organism
+
+        # Requiring all parameters calibrated fails when :assumed / uncalibrated entries exist
+        reg_audit_strict = audit_parameter_provenance_registry(reg; target_organism=:Pseudomonas_aeruginosa_PAO1, require_all_calibrated=true)
+        @test !reg_audit_strict.audit_passed
+
+        # Fully calibrated organism-matched registry passes organism transferability
+        reg_cal = ParameterProvenanceRegistry("TEST-REG-CAL", [p_lit, p_meas])
+        reg_cal_audit = audit_parameter_provenance_registry(reg_cal; target_organism=:Pseudomonas_aeruginosa_PAO1, require_all_calibrated=true)
+        @test reg_cal_audit.audit_passed
+        @test reg_cal_audit.all_parameters_calibrated
+        @test reg_cal_audit.empirically_calibrated_for_target_organism
+
+        # Edge cases: assumed/unassigned claiming calibrated=true, value outside bounds, duplicate symbols
+        @test_throws ArgumentError ParameterProvenanceEntry(
+            symbol = :bad_cal, value = 1.0, unit = "1", si_exponents = (0, 0, 0, 0, 0, 0, 0),
+            uncertainty_bounds = (0.0, 2.0), organism_strain = :unassigned_synthetic,
+            source_status = :assumed, calibrated = true
+        )
+        @test_throws ArgumentError ParameterProvenanceEntry(
+            symbol = :out_of_bounds, value = 5.0, unit = "1", si_exponents = (0, 0, 0, 0, 0, 0, 0),
+            uncertainty_bounds = (0.0, 2.0), organism_strain = :unassigned_synthetic,
+            source_status = :assumed, calibrated = false
+        )
+        @test_throws ArgumentError ParameterProvenanceRegistry("DUP", [p_lit, p_lit])
+    end
+
+    # -----------------------------------------------------------------------
+    # 12. Milestone M6.2: Anisotropic OpenFOAM Mesh Exchange & PHREEQC Reference Benchmarks (Gates G1 & G2)
+    # -----------------------------------------------------------------------
+    @testset "Milestone M6.2: Anisotropic CFL/Peclet, geometric overlap reconstruction, and Menke 2026 PHREEQC benchmark" begin
+        # 1. Anisotropic high-aspect-ratio boundary-layer mesh (dx = 10 um, dy = 100 um, dz = 1000 um)
+        # Isotropic length scale = (1e-5 * 1e-4 * 1e-3)^(1/3) = 1e-4 m (100 um), which is 10x larger than dx!
+        n_cells = 4
+        centers = [
+            0.5e-5 0.5e-4 0.5e-3;
+            1.5e-5 0.5e-4 0.5e-3;
+            2.5e-5 0.5e-4 0.5e-3;
+            3.5e-5 0.5e-4 0.5e-3
+        ]
+        dims = repeat([1.0e-5 1.0e-4 1.0e-3], n_cells, 1)
+        vols = vec(prod(dims; dims=2)) # 1.0e-12 m^3 per cell
+        # Velocity along x is u_x = 1.0e-3 m/s, dt = 0.008 s:
+        # Directional CFL_x = u_x * dt / dx = 1e-3 * 0.008 / 1e-5 = 0.80
+        # Isotropic CFL = |u| * dt / V^(1/3) = 1e-3 * 0.008 / 1e-4 = 0.08 (underestimates CFL by 10x!)
+        vel_vecs = repeat([1.0e-3 0.0 0.0], n_cells, 1)
+        conc_field = [2.0, 1.6, 1.2, 0.8]
+        patches = [
+            OpenFOAMBoundaryPatch("inlet", :fixedValue, [2.0]; flux_mol_s=1.0e-12),
+            OpenFOAMBoundaryPatch("outlet", :zeroGradient, [0.8]; flux_mol_s=-1.0e-12)
+        ]
+
+        ex_aniso = OpenFOAMMeshExchange(
+            vessel_id = "V-ANISO",
+            time_h = 24.0,
+            timestep_s = 0.008,
+            compartment = :detached_biofilm,
+            field_name = "C_nutrient",
+            field_class = :volScalarField,
+            dimensions = (0, -3, 0, 0, 1, 0, 0),
+            cell_centers_m = centers,
+            cell_volumes_m3 = vols,
+            cell_dimensions_m = dims,
+            velocity_vectors_m_s = vel_vecs,
+            coordinate_frame = :cartesian_right_handed_m,
+            internal_field = conc_field,
+            boundary_patches = patches,
+            velocity_magnitudes_m_s = fill(1.0e-3, n_cells),
+            diffusivities_m2_s = fill(1.0e-10, n_cells)
+        )
+
+        stab_aniso = audit_openfoam_transport_stability(ex_aniso; max_courant=0.50, max_peclet=10_000.0)
+        @test isapprox(stab_aniso.max_directional_courant, 0.80; rtol=1e-10)
+        @test isapprox(stab_aniso.max_isotropic_courant, 0.08; rtol=1e-10)
+        @test stab_aniso.max_cell_aspect_ratio ≈ 100.0
+        @test stab_aniso.anisotropic_instability_masked_by_isotropic
+        # Because directional CFL = 0.80 > 0.50, stability audit rightly flags instability even though isotropic CFL = 0.08 < 0.50
+        @test !stab_aniso.stable
+
+        stab_aniso_relaxed = audit_openfoam_transport_stability(ex_aniso; max_courant=1.0, max_peclet=10_000.0)
+        @test stab_aniso_relaxed.stable
+
+        # 2. Geometric overlap matrix from bounding boxes and reconstruction error audit
+        # Target coarse mesh: 2 cells splitting the 4 fine cells along x at x = 2.0e-5 m
+        tgt_centers = [
+            1.0e-5 0.5e-4 0.5e-3;
+            3.0e-5 0.5e-4 0.5e-3
+        ]
+        tgt_dims = [
+            2.0e-5 1.0e-4 1.0e-3;
+            2.0e-5 1.0e-4 1.0e-3
+        ]
+        geom_ov = build_geometric_overlap_matrix(centers, dims, tgt_centers, tgt_dims)
+        @test geom_ov.partition_of_unity_satisfied
+        @test geom_ov.volume_consistency_satisfied
+        @test geom_ov.unmapped_volume_fraction <= 1e-12
+        @test size(geom_ov.overlap_weights) == (2, 4)
+
+        # Mismatched coordinate frames are rejected
+        @test_throws ArgumentError build_geometric_overlap_matrix(
+            centers, dims, tgt_centers, tgt_dims;
+            coordinate_frame_source = :cartesian_right_handed_m,
+            coordinate_frame_target = :cylindrical_r_theta_z_m
+        )
+
+        recon = evaluate_mesh_mapping_reconstruction_error(
+            ex_aniso, tgt_centers, tgt_dims, geom_ov.overlap_weights;
+            expected_net_boundary_flux_mol_s = 0.0
+        )
+        @test recon.mass_conserved
+        @test recon.boundary_flux_conserved
+        @test recon.spatially_accurate
+        @test recon.spatial_centroid_shift_m <= 1e-5
+        @test recon.l1_reconstruction_error > 0.0
+        @test recon.l2_reconstruction_rmse < 0.25
+
+        # Uniform field has zero L1/L2/Linf reconstruction error across coarse-to-fine prolongation
+        ex_unif = OpenFOAMMeshExchange(
+            vessel_id = "V-ANISO", time_h = 24.0, timestep_s = 0.008,
+            compartment = :detached_biofilm, cell_centers_m = centers,
+            cell_volumes_m3 = vols, cell_dimensions_m = dims,
+            internal_field = fill(1.5, n_cells)
+        )
+        recon_unif = evaluate_mesh_mapping_reconstruction_error(
+            ex_unif, tgt_centers, tgt_dims, geom_ov.overlap_weights
+        )
+        @test recon_unif.l1_reconstruction_error <= 1e-14
+        @test recon_unif.l2_reconstruction_rmse <= 1e-14
+        @test recon_unif.linf_reconstruction_error <= 1e-14
+
+        # 3. PHREEQC database compatibility, reference electrode provenance, molality-to-molarity, and Menke 2026 benchmark
+        ph_she = PHREEQCSpeciesAdapter(
+            vessel_id = "V-CHEM", time_h = 24.0, compartment = :detached_biofilm,
+            pH = 7.2, pe = -3.0, ionic_strength_M = 0.13,
+            species_molalities_mol_kgw = Dict("Na+" => 0.10, "Ca+2" => 0.01, "Cl-" => 0.12, "H+" => 10.0^(-7.2), "OH-" => 10.0^(-6.8)),
+            species_charges = Dict("Na+" => 1, "Ca+2" => 2, "Cl-" => -1, "H+" => 1, "OH-" => -1),
+            database_name = "phreeqc.dat",
+            database_version = "3.7.3",
+            reference_electrode = :SHE,
+            water_mass_kgw_per_L = 0.994,
+            solution_density_kg_L = 1.005,
+            mineral_phases = [
+                PHREEQCMineralPhase(
+                    "Calcite", "CaCO3";
+                    saturation_index = 0.25, moles_mol_L = 0.001, delta_moles_mol_L = 1.0e-5,
+                    kinetic_rate_mol_L_s = 2.8e-9, kinetic_precipitation_verified = true
+                ),
+                PHREEQCMineralPhase(
+                    "Dolomite", "CaMg(CO3)2";
+                    saturation_index = 0.40, moles_mol_L = 0.0, delta_moles_mol_L = 0.0,
+                    kinetic_rate_mol_L_s = 0.0, kinetic_precipitation_verified = false
+                )
+            ]
+        )
+        db_compat = verify_phreeqc_database_compatibility([ph_she]; expected_database="phreeqc.dat", expected_version="3.7.3")
+        @test db_compat.compatible
+
+        # Mixing phreeqc.dat with pitzer.dat across snapshots throws an incompatibility error
+        ph_pitzer = PHREEQCSpeciesAdapter(
+            vessel_id = "V-BRINE", time_h = 24.0, compartment = :effluent,
+            pH = 7.0, pe = 2.0, ionic_strength_M = 1.2,
+            species_molalities_mol_kgw = Dict("Na+" => 1.2, "Cl-" => 1.2),
+            species_charges = Dict("Na+" => 1, "Cl-" => -1),
+            database_name = "pitzer.dat",
+            database_version = "3.7.3"
+        )
+        @test_throws ArgumentError verify_phreeqc_database_compatibility([ph_she, ph_pitzer]; throw_on_mismatch=true)
+        db_mix = verify_phreeqc_database_compatibility([ph_she, ph_pitzer]; throw_on_mismatch=false)
+        @test !db_mix.compatible
+
+        # Molality (mol/kgw) to molarity (mol/L) conversion accounts for water_mass_kgw_per_L and solution density
+        conv_na = convert_molality_to_molarity(0.10; water_mass_kgw_per_L=0.994, solution_density_kg_L=1.005)
+        @test isapprox(conv_na.molarity_mol_L, 0.10 * 0.994; rtol=1e-12)
+        @test conv_na.density_consistent
+        snap_she = summarize_phreeqc_adapter_to_snap(ph_she)
+        @test isapprox(snap_she.ca_mol_L, 0.01 * 0.994; rtol=1e-12)
+
+        # Ag/AgCl (3M KCl) reference electrode offset check (-0.210 V offset vs SHE at 25 C)
+        eh_she_25c = (8.314462618 * 298.15 * log(10.0) / 96485.33212) * (-3.0)
+        ph_agagcl = PHREEQCSpeciesAdapter(
+            vessel_id = "V-CHEM", time_h = 24.0, compartment = :detached_biofilm,
+            pH = 7.0, pe = -3.0, eh_volts = eh_she_25c - 0.210, ionic_strength_M = 0.05,
+            species_molalities_mol_kgw = Dict("Na+" => 0.05, "Cl-" => 0.05, "H+" => 1.0e-7, "OH-" => 1.0e-7),
+            species_charges = Dict("Na+" => 1, "Cl-" => -1, "H+" => 1, "OH-" => -1),
+            reference_electrode = :Ag_AgCl_3M_KCl
+        )
+        audit_agagcl = audit_phreeqc_speciation_balance(ph_agagcl)
+        @test audit_agagcl.nernst_eh_consistent
+        @test audit_agagcl.consistent
+
+        # Audit separates kinetically verified precipitation (Calcite) from unverified supersaturation (Dolomite)
+        audit_she = audit_phreeqc_speciation_balance(ph_she)
+        @test audit_she.consistent
+        @test "Dolomite" in audit_she.supersaturated_without_kinetic_verification
+        @test !("Calcite" in audit_she.supersaturated_without_kinetic_verification)
+
+        # Menke, Doster & Maes (Oct 2026, arXiv:2610.19057) physics-informed operator-splitting benchmark
+        menke_res = run_menke_2026_retardation_benchmark(
+            peclet_numbers = [0.1, 1.0, 10.0],
+            porosity = 0.45,
+            solid_density_kg_L = 2.65,
+            distribution_kd_L_kg = 0.35,
+            n_cells = 48,
+            domain_length_m = 0.01
+        )
+        @test menke_res.gate_g2_benchmark_passed
+        @test menke_res.within_menke_0_6_pct_tolerance
+        @test menke_res.analytical_retardation_factor > 1.0
+        @test menke_res.max_retardation_rel_error <= 0.006
+        @test menke_res.max_inventory_mass_rel_error <= 1e-10
+    end
+
+    # -----------------------------------------------------------------------
+    # 13. Milestone M6.5: Multivariate OOD, minority recall, and replicate stratification gates
+    # -----------------------------------------------------------------------
+    @testset "Milestone M6.5: OOD fraction, minority recall, and biological replicate gates in EmpiricalValidationProtocol" begin
+        proto_emp = EmpiricalValidationProtocol(
+            protocol_id = "M6-EMP-GATE",
+            track = :track1_nanobio,
+            data_provenance = :deidentified_experimental_fcs,
+            independent_reference_labels = true,
+            counting_beads_verified = true,
+            internalization_imaging_verified = true,
+            n_independent_runs = 3,
+            n_heldout_runs = 1
+        )
+
+        # High OOD fraction (> 0.15) triggers domain_shift_detected and recommends abstention
+        res_ood = evaluate_empirical_generalization_readiness(
+            proto_emp;
+            target_task = :nanocarrier_uptake,
+            synthetic_accuracy = 0.96,
+            heldout_run_accuracy = 0.91,
+            feature_psi_drift = 0.08,
+            ood_fraction = 0.28,
+            max_allowed_ood_fraction = 0.15
+        )
+        @test res_ood.domain_shift_detected
+        @test res_ood.multivariate_or_z_shift_detected
+        @test !res_ood.empirical_generalization_established
+        @test res_ood.recommended_decision == :abstain_or_defer_domain_shift
+
+        # Low minority-class recall (< 0.75) blocks empirical generalization even when overall accuracy is 0.92
+        res_min_fail = evaluate_empirical_generalization_readiness(
+            proto_emp;
+            target_task = :nanocarrier_uptake,
+            synthetic_accuracy = 0.96,
+            heldout_run_accuracy = 0.92,
+            feature_psi_drift = 0.06,
+            minority_class_recall = 0.55,
+            min_minority_class_recall = 0.75
+        )
+        @test !res_min_fail.minority_recall_satisfied
+        @test !res_min_fail.empirical_generalization_established
+
+        # Biological replicate drop (< 0.75 on worst replicate) blocks empirical generalization
+        res_rep_fail = evaluate_empirical_generalization_readiness(
+            proto_emp;
+            target_task = :nanocarrier_uptake,
+            synthetic_accuracy = 0.96,
+            heldout_run_accuracy = 0.89,
+            feature_psi_drift = 0.06,
+            minority_class_recall = 0.85,
+            replicate_min_accuracy = 0.62,
+            min_replicate_accuracy = 0.75
+        )
+        @test !res_rep_fail.replicate_stratification_satisfied
+        @test !res_rep_fail.empirical_generalization_established
+    end
 end
+
+

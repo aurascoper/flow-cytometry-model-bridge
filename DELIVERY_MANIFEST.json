@@ -1,6 +1,6 @@
 {
   "package_name": "Flow Cytometry + Microfluidic Classification Engine & Model Bridge Complete Delivery Bundle",
-  "created_date": "2026-10-30",
+  "created_date": "2026-10-31",
   "verification": {
     "main_presentation_slide_count": 22,
     "main_presentation_original_slide_count": 20,
@@ -15,14 +15,14 @@
     "integrated_into_existing_openfoam_phreeqc_solvers": false,
     "julia_version": "1.13.1",
     "julia_test_command": "julia --startup-file=no code/test_FlowCytometryObservationModel.jl && julia --startup-file=no code/test_MicrofluidicClassificationEngine.jl",
-    "julia_observation_model_test_passed": 191,
-    "julia_observation_model_test_total": 191,
-    "julia_classification_engine_test_passed": 692,
-    "julia_classification_engine_test_total": 692,
-    "julia_test_passed": 883,
-    "julia_test_total": 883,
-    "model_adapter_version": "0.3.0",
-    "microfluidic_engine_version": "0.3.0",
+    "julia_observation_model_test_passed": 262,
+    "julia_observation_model_test_total": 262,
+    "julia_classification_engine_test_passed": 805,
+    "julia_classification_engine_test_total": 805,
+    "julia_test_passed": 1067,
+    "julia_test_total": 1067,
+    "model_adapter_version": "0.4.0",
+    "microfluidic_engine_version": "0.4.0",
     "priorities_implemented": [
       "Priority 1: Observation-model specification and volume-convention MLE consistency",
       "Priority 2: Synthetic-data simulation and parameter recovery",
@@ -36,24 +36,29 @@
       "Milestone M2: Full-species PHREEQC snapshot adapter (PHREEQCSpeciesAdapter, TSV/CSV selected-output IO, charge/element balance, Nernst Eh-pe, and mineral SI audits)",
       "Milestone M3: Switchable biofilm constitutive layer (BiofilmMatrixComposition PGA/EPS/Curli/Cellulose swelling/wrinkling mechanics, heterogeneous D_eff, and 1D conservative reactive transport)",
       "Milestone M4: Switchable regulatory & physiological dynamics (Droop quota Q, stress agr/RNAIII/alpha-PSM/EV biogenesis, electrokinetic AHL degradation, 3-mode polymicrobial crosstalk, and S. aureus fruA/fruK vancomycin-tolerant heterogeneity)",
-      "Milestone M5: Empirical validation protocol & domain-shift gate (EmpiricalValidationProtocol, PSI drift detection, and synthetic-vs-empirical claim separation)"
-    ]
+      "Milestone M5: Empirical validation protocol & domain-shift gate (EmpiricalValidationProtocol, PSI drift detection, and synthetic-vs-empirical claim separation)",
+      "Milestone M6: Physics and biology calibration layer (G0 provenance/SI dimensional registry, G1 anisotropic mesh & overlap reconstruction, G2 PHREEQC database/electrode provenance & Menke 2026 retardation benchmark, G3 constitutive maturity levels & multi-probe diffusivity calibration, G4 explicit species regulatory graph & Droop quota conservation, G5 17-run ablation matrix & multivariate Mahalanobis/ECE empirical gates)"
+    ],
+    "repository_visibility": "PUBLIC",
+    "is_private": false,
+    "manifest_entries_count": 29,
+    "sha256sums_entries_count": 30
   },
   "files": [
     {
       "path": "README_DELIVERY.md",
-      "bytes": 9422,
-      "sha256": "fc12dfde2435a3c6a0164223645be178fab0e0126e6d3b642f79c32cd92b5a90"
+      "bytes": 10747,
+      "sha256": "5de584a6f740f52803c45d5b350d8ea45511c562890ba35bf5204d9849b74db5"
     },
     {
       "path": "code/FlowCytometryObservationModel.jl",
-      "bytes": 105076,
-      "sha256": "0911dc9151b732142b246c649a87a30a21afb135f433af512f5eb84f5d40dbd1"
+      "bytes": 146830,
+      "sha256": "909c9caa5124bdba1cfc81246360ab7cf76e7c0c665ec00e3de87db673cc4fe0"
     },
     {
       "path": "code/MicrofluidicClassificationEngine.jl",
-      "bytes": 181864,
-      "sha256": "5de3c0bb505c6eccc8f560193c120110fbbcb767be801e153892316f9f7924fb"
+      "bytes": 245391,
+      "sha256": "9c62af453f9c3090cfef9fb40e3c701a3f8a8965ba1d15d157222fd0116eade8"
     },
     {
       "path": "code/flow_cytometry_samples_template.csv",
@@ -67,13 +72,13 @@
     },
     {
       "path": "code/test_FlowCytometryObservationModel.jl",
-      "bytes": 44535,
-      "sha256": "e68b06f958013f7356dadda4d2c4c7de50f874886b579470553cb50e532d562b"
+      "bytes": 62891,
+      "sha256": "e6cdb0c9428e7c81d735b0711562259c689f010698579999e23d161a904e9ccf"
     },
     {
       "path": "code/test_MicrofluidicClassificationEngine.jl",
-      "bytes": 52627,
-      "sha256": "6bd365e8228c6b523e445f79fb25472cc8d13041d9fadb164028575d193e1299"
+      "bytes": 70994,
+      "sha256": "e36c10eef1b80ad8cd34cc67c046e7f9402cb95b0fa5d406eba2c27907e9b5a3"
     },
     {
       "path": "code/verify_against_python_reference.py",
@@ -82,8 +87,8 @@
     },
     {
       "path": "docs/biofilm_openfoam_phreeqc_coupling_plan_2026-10-30.md",
-      "bytes": 17707,
-      "sha256": "7e68543870a74170a06f62de71306f78aa6b13fea22f393958b4cd98ef3381da"
+      "bytes": 20676,
+      "sha256": "e935719de7a53fbafba33a9b02a51bd68efd615b2999ca237709201874a1d633"
     },
     {
       "path": "docs/build_flow_cytometry_addendum.py",
@@ -102,8 +107,8 @@
     },
     {
       "path": "docs/flow_cytometry_model_bridge_spec.md",
-      "bytes": 25780,
-      "sha256": "ae9f9d0cc8b8b928be47272b4f70c5a88c65b848f3e33b9f4bd75becc1b6efd1"
+      "bytes": 27749,
+      "sha256": "331a3213ad1d9d15cf20a68704cef68c8b3933578efdd3a42bd7e75b39590941"
     },
     {
       "path": "presentations/Clay_Microbes_Metal_22slides_Flow_Cytometry_Addendum.pdf",
@@ -182,8 +187,8 @@
     },
     {
       "path": "workbench/microfluidic_cytometry_workbench.html",
-      "bytes": 107910,
-      "sha256": "8b15bf26663f09692ef0f591d8691b1de06dfdb5bb65120dec46a496fb169766"
+      "bytes": 108834,
+      "sha256": "22838eeb5c7323fea5414b0138bebf33f427e38189b5d205545ea25d151bfd3d"
     }
   ]
 }
